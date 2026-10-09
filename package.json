@@ -1,0 +1,13 @@
+{
+  "name": "handshake-audit",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @handshake/web --filter @handshake/api dev",
+    "build": "pnpm -r build",
+    "check": "pnpm -r check"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
