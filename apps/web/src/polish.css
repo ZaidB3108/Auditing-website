@@ -1,0 +1,58 @@
+/* Consistent layout and control sizing across location, profile, and admin views. */
+.page { max-width: 1160px; }
+
+.heading { padding: 18px 0 24px; }
+.heading h1 { letter-spacing: -0.02em; }
+nav { gap: 4px; }
+nav button { border-radius: 8px 8px 0 0; padding: 12px 16px; }
+nav button:hover { background: #e5ede1; }
+
+.location-grid { grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 18px; }
+.location-card, .panel { border-radius: 14px; box-shadow: 0 2px 8px #173d2d0a; }
+.location-card { padding: 20px; }
+.location-card > div:last-child { display: grid; gap: 10px; align-items: end; }
+.location-card button { width: 100%; min-height: 42px; }
+
+.panel { padding: 22px; }
+.panel h2 { margin-bottom: 8px; }
+.panel > label, .location-card label, .panel form > label, form.panel label {
+  display: grid;
+  gap: 7px;
+  margin: 15px 0;
+  color: #435246;
+  font-size: 13px;
+  font-weight: 750;
+}
+.panel input, .panel select, .panel textarea, .location-card select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #cbd7c8;
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: #fff;
+  color: #203027;
+  font: inherit;
+}
+.panel textarea { min-height: 88px; resize: vertical; }
+.panel button, .location-card button, form button { min-height: 42px; }
+.panel > button, form.panel > button { margin-top: 4px; align-self: start; }
+.panel small { display: block; margin-top: 10px; color: #69776d; line-height: 1.4; }
+
+.profile-grid, .management-grid { align-items: start; gap: 18px; }
+.profile-grid > .panel, .management-grid > .panel { height: 100%; }
+.audit-list > div { display: grid; gap: 7px; padding: 15px 0; }
+.audit-list button { justify-self: start; margin-top: 2px; }
+.proposal { padding: 15px 0; }
+.proposal button { white-space: nowrap; }
+
+.audit-card { margin-top: 24px; padding: 0 24px; }
+.section { padding: 24px 0; }
+.comment textarea { min-height: 78px; }
+footer { padding: 24px 0 4px; }
+
+@media (max-width: 620px) {
+  nav { overflow-x: auto; }
+  nav button { flex: 0 0 auto; }
+  .location-grid { grid-template-columns: 1fr; }
+  .panel, .location-card { padding: 17px; }
+}
