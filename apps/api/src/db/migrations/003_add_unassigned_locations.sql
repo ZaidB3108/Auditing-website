@@ -32,7 +32,6 @@ WITH supplied_locations (area_name, location_name) AS (
     ('Unassigned locations', 'Union - Shake Smart'),
     ('Unassigned locations', 'Union Food Court - Retail'),
     ('Unassigned locations', 'City Edge'),
-    ('Unassigned locations', 'Miller Cafe (2)'),
     ('Unassigned locations', 'Urban Bytes'),
     ('Unassigned locations', 'United Table'),
     ('Unassigned locations', 'Athletic Center')
