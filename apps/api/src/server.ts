@@ -83,18 +83,18 @@ app.get("/locations", requireAuth, async (_request, response) => {
     `SELECT l.id, l.area_name, l.location_name, l.owner_auditor_id, owner.display_name AS owner_name,
             coalesce(json_agg(json_build_object('id', b.id, 'binderName', b.binder_name) ORDER BY b.binder_name)
               FILTER (WHERE b.id IS NOT NULL), '[]') AS binders
-       FROM locations l JOIN auditors owner ON owner.id = l.owner_auditor_id
+       FROM locations l LEFT JOIN auditors owner ON owner.id = l.owner_auditor_id
        LEFT JOIN binders b ON b.location_id = l.id
       WHERE l.active = true GROUP BY l.id, owner.display_name ORDER BY l.area_name, l.location_name`
   );
-  response.json(rows.map((row) => ({ id: row.id, areaName: row.area_name, locationName: row.location_name, ownerAuditorId: row.owner_auditor_id, ownerName: row.owner_name, binders: row.binders })));
+  response.json(rows.map((row) => ({ id: row.id, areaName: row.area_name, locationName: row.location_name, ownerAuditorId: row.owner_auditor_id, ownerName: row.owner_name ?? "Unassigned", binders: row.binders })));
 });
 
 app.post("/locations", requireAuth, requireCoreApprover, async (request, response) => {
   const { areaName, locationName, binderName, ownerAuditorId } = request.body as { areaName?: string; locationName?: string; binderName?: string; ownerAuditorId?: string };
-  if (!areaName?.trim() || !locationName?.trim() || !binderName?.trim() || !ownerAuditorId) return response.status(400).json({ error: "Area, location, binder, and owner are required." });
+  if (!areaName?.trim() || !locationName?.trim() || !binderName?.trim()) return response.status(400).json({ error: "Area, location, and binder are required." });
   const location = await withTransaction(async (client) => {
-    const created = await client.query("INSERT INTO locations (area_name, location_name, owner_auditor_id) VALUES ($1, $2, $3) RETURNING id", [areaName.trim(), locationName.trim(), ownerAuditorId]);
+    const created = await client.query("INSERT INTO locations (area_name, location_name, owner_auditor_id) VALUES ($1, $2, $3) RETURNING id", [areaName.trim(), locationName.trim(), ownerAuditorId || null]);
     await client.query("INSERT INTO binders (location_id, binder_name) VALUES ($1, $2)", [created.rows[0].id, binderName.trim()]);
     return created.rows[0];
   });
