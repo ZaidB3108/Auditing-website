@@ -1,46 +1,66 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-type AuditSection = { id: string; title: string; detail?: string };
-const sections: AuditSection[] = [
-  { id: "safety", title: "Safety Topic and Sign-off" },
-  { id: "opening", title: "Opening Checklist" },
-  { id: "mid", title: "Mid Checklist" },
-  { id: "closing", title: "Closing Checklist" },
-  { id: "cooler", title: "Cooler Temp Logs" },
-  { id: "two-hour", title: "2 hour food temp logs" },
-  { id: "protein", title: "Protein Temp Logs Maintained with MGR Sign-off" },
-  { id: "test", title: "Checklist Test Item(s)", detail: "Document the test item in the section comment." }
-];
-
+const apiUrl = "http://localhost:3001";
 type Result = "current" | "past" | "missing";
-type Response = { result: Result; comment: string };
-const initial = Object.fromEntries(sections.map((section) => [section.id, { result: "current" as Result, comment: "" }]));
+type Auditor = { id: string; displayName: string; email: string; isCoreApprover: boolean };
+type Binder = { id: string; binderName: string };
+type Location = { id: string; areaName: string; locationName: string; ownerAuditorId: string; ownerName: string; binders: Binder[] };
+type Section = { id: string; title: string; detail?: string };
+type AuditResponse = { result: Result; comment: string };
+type Dashboard = { ownedLocations: Array<{ id: string; areaName: string; locationName: string }>; receivedAudits: Array<{ id: string; auditDate: string; areaName: string; locationName: string; binderName: string; auditorName: string; exceptionCount: number }>; proposals: Array<{ id: string; displayName: string; email: string; status: string; approvals: number }> };
+
+const sections: Section[] = [
+  { id: "safety", title: "Safety Topic and Sign-off" }, { id: "opening", title: "Opening Checklist" }, { id: "mid", title: "Mid Checklist" }, { id: "closing", title: "Closing Checklist" }, { id: "cooler", title: "Cooler Temp Logs" }, { id: "two-hour", title: "2 hour food temp logs" }, { id: "protein", title: "Protein Temp Logs Maintained with MGR Sign-off" }, { id: "test", title: "Checklist Test Item(s)", detail: "Use the section comment to record the test item." }
+];
+const blankResponses = () => Object.fromEntries(sections.map((section) => [section.id, { result: "current" as Result, comment: "" }]));
+
+async function request<T>(path: string, token?: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${apiUrl}${path}`, { ...options, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options?.headers ?? {}) } });
+  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error ?? "Request failed."); }
+  return response.status === 204 ? (undefined as T) : response.json() as Promise<T>;
+}
 
 export function App() {
-  const [responses, setResponses] = useState<Record<string, Response>>(initial);
-  const [submitted, setSubmitted] = useState(false);
-  const exceptions = useMemo(() => Object.values(responses).filter(({ result }) => result !== "current").length, [responses]);
-  const update = (id: string, patch: Partial<Response>) => setResponses((current) => ({ ...current, [id]: { ...current[id], ...patch } }));
-  const canSubmit = sections.filter(({ id }) => responses[id].result !== "current").every(({ id }) => responses[id].comment.trim().length > 0);
+  const [token, setToken] = useState(() => localStorage.getItem("handshake-token") ?? "");
+  const [auditor, setAuditor] = useState<Auditor | null>(() => { const stored = localStorage.getItem("handshake-auditor"); return stored ? JSON.parse(stored) as Auditor : null; });
+  const [accounts, setAccounts] = useState<Array<{ email: string; displayName: string }>>([]);
+  const [error, setError] = useState("");
+  useEffect(() => { request<Array<{ email: string; displayName: string }>>("/auth/test-accounts").then(setAccounts).catch(() => setError("The API is not available. Start the backend, then refresh.")); }, []);
+  const logout = async () => { try { await request("/auth/logout", token, { method: "POST" }); } catch { /* local session may already be gone */ } localStorage.removeItem("handshake-token"); localStorage.removeItem("handshake-auditor"); setToken(""); setAuditor(null); };
+  const completeSignIn = (sessionToken: string, signedInAuditor: Auditor) => { localStorage.setItem("handshake-token", sessionToken); localStorage.setItem("handshake-auditor", JSON.stringify(signedInAuditor)); setToken(sessionToken); setAuditor(signedInAuditor); setError(""); };
+  if (!token || !auditor) return <Login accounts={accounts} error={error} onLogin={completeSignIn} />;
+  return <Application token={token} auditor={auditor} onLogout={logout} />;
+}
 
-  if (submitted) return <main className="success"><h1>Audit submitted</h1><p>Food Court · Binder #1 has been recorded. {exceptions} follow-up item{exceptions === 1 ? "" : "s"} will appear in audit history.</p><button onClick={() => setSubmitted(false)}>Return to audit</button></main>;
+function Login({ accounts, error, onLogin }: { accounts: Array<{ email: string; displayName: string }>; error: string; onLogin: (token: string, auditor: Auditor) => void }) {
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [message, setMessage] = useState(""); const [busy, setBusy] = useState(false);
+  const signIn = async (event: React.FormEvent) => { event.preventDefault(); setBusy(true); setMessage(""); try { const result = await request<{ token: string; auditor: Auditor }>("/auth/login", undefined, { method: "POST", body: JSON.stringify({ email, password }) }); onLogin(result.token, result.auditor); } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to sign in."); } finally { setBusy(false); } };
+  return <main className="login-page"><section className="login-card"><div className="brand large">HANDSHAKE <span>DAILY AUDIT</span></div><h1>Sign in</h1><p>Use your Compass email account. Microsoft Entra sign-in will replace this local test sign-in before deployment.</p>{error && <p className="error">{error}</p>}<form onSubmit={signIn}><label>Compass email<select value={email} onChange={(event) => setEmail(event.target.value)} required><option value="">Choose a test auditor</option>{accounts.map((account) => <option value={account.email} key={account.email}>{account.displayName} · {account.email}</option>)}</select></label><label>Temporary test password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter password" required /></label><button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button></form><div className="test-note">For local testing, all seeded accounts use <code>AuditTest!2026</code>.</div>{message && <p className="error">{message}</p>}</section></main>;
+}
 
-  return <main className="app-shell">
-    <header><div className="brand">HANDSHAKE <span>DAILY AUDIT</span></div><div className="auditor">Signed in as Shannon</div></header>
-    <div className="page">
-      <div className="breadcrumb">Daily audit / Union Food / Food Court / Binder #1</div>
-      <div className="heading"><div><h1>Checklist evidence</h1><p>Record the documentation visible during this audit. Each section has its own comment field.</p></div><div className="date">March 18, 2026</div></div>
-      <div className="notice">Location owner: Chuck · You may audit this location because it is not assigned to you.</div>
-      <section className="audit-card">
-        {sections.map((section) => { const response = responses[section.id]; const requiresComment = response.result !== "current"; return <article className="section" key={section.id}>
-          <div className="section-copy"><h2>{section.title}</h2>{section.detail && <p>{section.detail}</p>}</div>
-          <div className="choices" aria-label={`${section.title} evidence status`}>
-            {(["current", "past", "missing"] as Result[]).map((result) => <button key={result} className={response.result === result ? `choice ${result}` : "choice"} onClick={() => update(section.id, { result })}>{result === "current" ? "Current" : result === "past" ? "Past only" : "Missing"}</button>)}
-          </div>
-          <label className="comment"><span>Section comment{requiresComment ? " (required)" : " (optional)"}</span><textarea value={response.comment} onChange={(event) => update(section.id, { comment: event.target.value })} placeholder={requiresComment ? "Explain the issue or follow-up needed." : "Add a note for this section."} /></label>
-        </article>; })}
-      </section>
-      <footer><div>{exceptions ? `${exceptions} section${exceptions === 1 ? "" : "s"} need follow-up comments.` : "All sections are current."}</div><button disabled={!canSubmit} onClick={() => setSubmitted(true)}>Submit audit</button></footer>
-    </div>
-  </main>;
+function Application({ token, auditor, onLogout }: { token: string; auditor: Auditor; onLogout: () => void }) {
+  const [view, setView] = useState<"locations" | "profile" | "auditors">("locations"); const [locations, setLocations] = useState<Location[]>([]); const [auditors, setAuditors] = useState<Auditor[]>([]); const [dashboard, setDashboard] = useState<Dashboard | null>(null); const [selected, setSelected] = useState<{ location: Location; binder: Binder } | null>(null); const [message, setMessage] = useState("");
+  const load = async () => { try { const [locationData, auditorData, dashboardData] = await Promise.all([request<Location[]>("/locations", token), request<Auditor[]>("/auditors", token), request<Dashboard>("/dashboard", token)]); setLocations(locationData); setAuditors(auditorData); setDashboard(dashboardData); } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to load data."); } };
+  useEffect(() => { void load(); }, []);
+  if (selected) return <AuditForm token={token} auditor={auditor} selection={selected} onBack={() => setSelected(null)} onSubmitted={() => { setSelected(null); void load(); }} />;
+  return <main className="app-shell"><header><div className="brand">HANDSHAKE <span>DAILY AUDIT</span></div><div className="account">{auditor.displayName}<button className="text-button" onClick={onLogout}>Sign out</button></div></header><div className="page"><nav><button className={view === "locations" ? "active" : ""} onClick={() => setView("locations")}>Locations</button><button className={view === "profile" ? "active" : ""} onClick={() => setView("profile")}>My locations &amp; audits</button>{auditor.isCoreApprover && <button className={view === "auditors" ? "active" : ""} onClick={() => setView("auditors")}>Auditors</button>}</nav>{message && <p className="error">{message}</p>}{view === "locations" && <LocationView locations={locations} auditor={auditor} onChoose={(location, binder) => setSelected({ location, binder })} />}{view === "profile" && <ProfileView dashboard={dashboard} />}{view === "auditors" && <AuditorView token={token} auditors={auditors} dashboard={dashboard} onUpdate={load} />}</div></main>;
+}
+
+function LocationView({ locations, auditor, onChoose }: { locations: Location[]; auditor: Auditor; onChoose: (location: Location, binder: Binder) => void }) { return <section><div className="heading"><div><h1>Choose a location</h1><p>Every auditor can view each location. You cannot audit a location assigned to you.</p></div></div><div className="location-grid">{locations.map((location) => { const isOwner = location.ownerAuditorId === auditor.id; return <article className="location-card" key={location.id}><div><span className="eyebrow">{location.areaName}</span><h2>{location.locationName}</h2><p>Assigned owner: <strong>{location.ownerName}</strong></p></div><div>{location.binders.map((binder) => <button key={binder.id} disabled={isOwner} onClick={() => onChoose(location, binder)}>{isOwner ? "Your location" : `Audit ${binder.binderName}`}</button>)}</div>{isOwner && <small>Your profile will show audits completed here by other auditors.</small>}</article>; })}</div>{locations.length === 0 && <p className="empty">No locations have been added. An original auditor can add the first mapped location from the Auditors tab.</p>}</section>; }
+
+function ProfileView({ dashboard }: { dashboard: Dashboard | null }) { if (!dashboard) return <p>Loading profile…</p>; return <section><div className="heading"><div><h1>My locations &amp; audits</h1><p>Audits by other auditors appear here for the locations assigned to you.</p></div></div><div className="profile-grid"><article className="panel"><h2>Locations I own</h2>{dashboard.ownedLocations.length ? <ul>{dashboard.ownedLocations.map((location) => <li key={location.id}>{location.areaName} · {location.locationName}</li>)}</ul> : <p className="empty">No location ownership is mapped to you yet.</p>}</article><article className="panel"><h2>Audits completed at my locations</h2>{dashboard.receivedAudits.length ? <div className="audit-list">{dashboard.receivedAudits.map((audit) => <div key={audit.id}><strong>{audit.locationName} · {audit.binderName}</strong><span>{audit.auditDate} · audited by {audit.auditorName} · {audit.exceptionCount} exception{audit.exceptionCount === 1 ? "" : "s"}</span></div>)}</div> : <p className="empty">No other auditor has submitted an audit for your locations yet.</p>}</article></div></section>; }
+
+function AuditorView({ token, auditors, dashboard, onUpdate }: { token: string; auditors: Auditor[]; dashboard: Dashboard | null; onUpdate: () => Promise<void> }) {
+  const [proposal, setProposal] = useState({ displayName: "", email: "" }); const [location, setLocation] = useState({ areaName: "", locationName: "", binderName: "", ownerAuditorId: "" }); const [message, setMessage] = useState("");
+  const createProposal = async (event: React.FormEvent) => { event.preventDefault(); try { await request("/auditor-proposals", token, { method: "POST", body: JSON.stringify(proposal) }); setProposal({ displayName: "", email: "" }); setMessage("Auditor proposal created. All four original auditors must approve it."); await onUpdate(); } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to create proposal."); } };
+  const vote = async (proposalId: string, approved: boolean) => { try { await request(`/auditor-proposals/${proposalId}/votes`, token, { method: "POST", body: JSON.stringify({ approved }) }); await onUpdate(); } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to record vote."); } };
+  const createLocation = async (event: React.FormEvent) => { event.preventDefault(); try { await request("/locations", token, { method: "POST", body: JSON.stringify(location) }); setLocation({ areaName: "", locationName: "", binderName: "", ownerAuditorId: "" }); setMessage("Location and binder added."); await onUpdate(); } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to add location."); } };
+  return <section><div className="heading"><div><h1>Auditor management</h1><p>The original four auditors manage location ownership and new-auditor approval.</p></div></div>{message && <p className="success-message">{message}</p>}<div className="management-grid"><form className="panel" onSubmit={createLocation}><h2>Add a mapped location</h2><label>Area<input value={location.areaName} onChange={(event) => setLocation({ ...location, areaName: event.target.value })} required /></label><label>Location<input value={location.locationName} onChange={(event) => setLocation({ ...location, locationName: event.target.value })} required /></label><label>Binder<input value={location.binderName} onChange={(event) => setLocation({ ...location, binderName: event.target.value })} placeholder="Binder #1" required /></label><label>Location owner<select value={location.ownerAuditorId} onChange={(event) => setLocation({ ...location, ownerAuditorId: event.target.value })} required><option value="">Choose owner</option>{auditors.map((item) => <option value={item.id} key={item.id}>{item.displayName}</option>)}</select></label><button>Add location</button></form><form className="panel" onSubmit={createProposal}><h2>Propose an auditor</h2><label>Name<input value={proposal.displayName} onChange={(event) => setProposal({ ...proposal, displayName: event.target.value })} required /></label><label>Compass email<input type="email" value={proposal.email} onChange={(event) => setProposal({ ...proposal, email: event.target.value })} placeholder="name@compass-usa.com" required /></label><button>Request approval</button><small>Approved local-test auditors use the temporary password shown on the sign-in page.</small></form></div><article className="panel proposals"><h2>Auditor proposals</h2>{dashboard?.proposals.length ? dashboard.proposals.map((item) => <div className="proposal" key={item.id}><div><strong>{item.displayName}</strong><span>{item.email} · {item.approvals}/4 approvals · {item.status}</span></div>{item.status === "pending" && <div><button onClick={() => vote(item.id, true)}>Approve</button><button className="secondary" onClick={() => vote(item.id, false)}>Reject</button></div>}</div>) : <p className="empty">No auditor proposals.</p>}</article></section>;
+}
+
+function AuditForm({ token, auditor, selection, onBack, onSubmitted }: { token: string; auditor: Auditor; selection: { location: Location; binder: Binder }; onBack: () => void; onSubmitted: () => void }) {
+  const [responses, setResponses] = useState<Record<string, AuditResponse>>(blankResponses); const [error, setError] = useState(""); const [saving, setSaving] = useState(false); const exceptions = useMemo(() => Object.values(responses).filter((item) => item.result !== "current").length, [responses]); const canSubmit = sections.every((section) => responses[section.id].result === "current" || responses[section.id].comment.trim());
+  const update = (id: string, patch: Partial<AuditResponse>) => setResponses((current) => ({ ...current, [id]: { ...current[id], ...patch } }));
+  const submit = async () => { setSaving(true); setError(""); try { await request("/audits", token, { method: "POST", body: JSON.stringify({ binderId: selection.binder.id, responses: sections.map((section) => ({ sectionId: section.id, ...responses[section.id] })) }) }); onSubmitted(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to submit audit."); } finally { setSaving(false); } };
+  return <main className="app-shell"><header><div className="brand">HANDSHAKE <span>DAILY AUDIT</span></div><div className="account">{auditor.displayName}</div></header><div className="page"><button className="back" onClick={onBack}>← Back to locations</button><div className="heading"><div><div className="breadcrumb">{selection.location.areaName} / {selection.location.locationName} / {selection.binder.binderName}</div><h1>Checklist evidence</h1><p>Audit owner: {selection.location.ownerName}. Each section has an individual comment.</p></div></div>{error && <p className="error">{error}</p>}<section className="audit-card">{sections.map((section) => { const answer = responses[section.id]; const requireComment = answer.result !== "current"; return <article className="section" key={section.id}><div className="section-copy"><h2>{section.title}</h2>{section.detail && <p>{section.detail}</p>}</div><div className="choices">{(["current", "past", "missing"] as Result[]).map((result) => <button key={result} className={answer.result === result ? `choice ${result}` : "choice"} onClick={() => update(section.id, { result })}>{result === "current" ? "Current" : result === "past" ? "Past only" : "Missing"}</button>)}</div><label className="comment"><span>Section comment{requireComment ? " (required)" : " (optional)"}</span><textarea value={answer.comment} onChange={(event) => update(section.id, { comment: event.target.value })} placeholder={requireComment ? "Explain the issue or follow-up needed." : "Add a note for this section."} /></label></article>; })}</section><footer><div>{exceptions ? `${exceptions} section${exceptions === 1 ? "" : "s"} need follow-up comments.` : "All sections are current."}</div><button disabled={!canSubmit || saving} onClick={submit}>{saving ? "Submitting…" : "Submit audit"}</button></footer></div></main>;
 }
