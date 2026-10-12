@@ -163,6 +163,65 @@ app.post("/audit-transfer-requests/:requestId/decision", requireAuth, async (req
   response.status(204).end();
 });
 
+app.post("/auditor-absences", requireAuth, async (request, response) => {
+  const { startDate, endDate, note } = request.body as { startDate?: string; endDate?: string; note?: string };
+  const auditor = authed(request).auditor;
+  if (!auditor.canAudit) return response.status(403).json({ error: "Only active auditors can log an absence." });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate ?? "") || !/^\d{4}-\d{2}-\d{2}$/.test(endDate ?? "") || startDate! > endDate!) return response.status(400).json({ error: "Choose a valid leave start and end date." });
+  const { rows } = await pool.query("INSERT INTO auditor_absences (auditor_id, start_date, end_date, note) VALUES ($1, $2, $3, $4) RETURNING id", [auditor.id, startDate, endDate, note?.trim() ?? ""]);
+  response.status(201).json(rows[0]);
+});
+
+app.post("/audit-schedules", requireAuth, requireLocationManager, async (request, response) => {
+  const { binderId, auditDate, assignedAuditorId } = request.body as { binderId?: string; auditDate?: string; assignedAuditorId?: string };
+  if (!binderId || !assignedAuditorId || !/^\d{4}-\d{2}-\d{2}$/.test(auditDate ?? "")) return response.status(400).json({ error: "Binder, audit date, and assigned auditor are required." });
+  const assignment = await pool.query(
+    `SELECT b.id FROM binders b JOIN locations l ON l.id = b.location_id JOIN auditors a ON a.id = $2
+      WHERE b.id = $1 AND l.active = true AND a.active = true AND a.can_audit = true AND (l.owner_auditor_id IS NULL OR l.owner_auditor_id <> a.id)`, [binderId, assignedAuditorId]
+  );
+  if (!assignment.rows[0]) return response.status(400).json({ error: "Choose an active auditor who does not own this location." });
+  try {
+    const { rows } = await pool.query("INSERT INTO audit_schedules (binder_id, audit_date, assigned_auditor_id, created_by) VALUES ($1, $2, $3, $4) RETURNING id", [binderId, auditDate, assignedAuditorId, authed(request).auditor.id]);
+    response.status(201).json(rows[0]);
+  } catch { response.status(409).json({ error: "This binder already has an audit scheduled for that date." }); }
+});
+
+app.post("/audit-schedules/:scheduleId/coverage-requests", requireAuth, async (request, response) => {
+  const { requestedToId, note } = request.body as { requestedToId?: string; note?: string };
+  const auditor = authed(request).auditor;
+  if (!auditor.canAudit || !requestedToId || requestedToId === auditor.id) return response.status(400).json({ error: "Choose another active auditor to cover this audit." });
+  const eligible = await pool.query("SELECT id FROM auditors WHERE id = $1 AND active = true AND can_audit = true", [requestedToId]);
+  if (!eligible.rows[0]) return response.status(400).json({ error: "Choose an active auditor to cover this audit." });
+  const schedule = await pool.query("SELECT id FROM audit_schedules WHERE id = $1 AND assigned_auditor_id = $2 AND status IN ('scheduled', 'covered')", [request.params.scheduleId, auditor.id]);
+  if (!schedule.rows[0]) return response.status(403).json({ error: "You can request coverage only for an audit assigned to you." });
+  try {
+    const { rows } = await pool.query("INSERT INTO audit_coverage_requests (schedule_id, requested_by, requested_to, note) VALUES ($1, $2, $3, $4) RETURNING id", [request.params.scheduleId, auditor.id, requestedToId, note?.trim() ?? ""]);
+    response.status(201).json(rows[0]);
+  } catch { response.status(409).json({ error: "There is already a pending coverage request for this audit." }); }
+});
+
+app.post("/audit-coverage-requests/:requestId/decision", requireAuth, async (request, response) => {
+  const { accepted } = request.body as { accepted?: boolean };
+  const auditor = authed(request).auditor;
+  if (!auditor.canAudit || typeof accepted !== "boolean") return response.status(400).json({ error: "An accept or reject decision is required." });
+  const result = await withTransaction(async (client) => {
+    const pending = await client.query(
+      `SELECT r.id, r.schedule_id, s.binder_id FROM audit_coverage_requests r JOIN audit_schedules s ON s.id = r.schedule_id
+        WHERE r.id = $1 AND r.requested_to = $2 AND r.status = 'pending' FOR UPDATE`, [request.params.requestId, auditor.id]
+    );
+    if (!pending.rows[0]) return null;
+    if (accepted) {
+      const eligible = await client.query("SELECT 1 FROM binders b JOIN locations l ON l.id = b.location_id WHERE b.id = $1 AND (l.owner_auditor_id IS NULL OR l.owner_auditor_id <> $2)", [pending.rows[0].binder_id, auditor.id]);
+      if (!eligible.rows[0]) throw new Error("owner cannot cover");
+      await client.query("UPDATE audit_schedules SET assigned_auditor_id = $1, status = 'covered' WHERE id = $2", [auditor.id, pending.rows[0].schedule_id]);
+    }
+    await client.query("UPDATE audit_coverage_requests SET status = $1, responded_at = now() WHERE id = $2", [accepted ? "accepted" : "rejected", pending.rows[0].id]);
+    return pending.rows[0];
+  });
+  if (!result) return response.status(404).json({ error: "That pending coverage request was not found." });
+  response.status(204).end();
+});
+
 app.get("/dashboard", requireAuth, async (request, response) => {
   const auditor = authed(request).auditor;
   const ownedLocations = await pool.query("SELECT id, area_name, location_name FROM locations WHERE owner_auditor_id = $1 AND active = true ORDER BY area_name, location_name", [auditor.id]);
@@ -174,7 +233,7 @@ app.get("/dashboard", requireAuth, async (request, response) => {
        JOIN auditors performed ON performed.id = a.auditor_id LEFT JOIN audit_responses r ON r.audit_id = a.id
       WHERE ${scope.where} GROUP BY a.id, l.area_name, l.location_name, b.binder_name, performed.display_name ORDER BY a.audit_date DESC, a.created_at DESC`, scope.values
   );
-  const [incomingTransfers, sentTransfers] = await Promise.all([
+  const [incomingTransfers, sentTransfers, scheduledAudits, incomingCoverage, absences] = await Promise.all([
     pool.query(
       `SELECT t.id, t.note, t.created_at, l.area_name, l.location_name, sender.display_name AS sender_name
          FROM audit_responsibility_transfers t JOIN locations l ON l.id = t.location_id JOIN auditors sender ON sender.id = t.requested_by
@@ -184,6 +243,21 @@ app.get("/dashboard", requireAuth, async (request, response) => {
       `SELECT t.id, t.status, t.created_at, l.area_name, l.location_name, recipient.display_name AS recipient_name
          FROM audit_responsibility_transfers t JOIN locations l ON l.id = t.location_id JOIN auditors recipient ON recipient.id = t.requested_to
         WHERE t.requested_by = $1 ORDER BY t.created_at DESC`, [auditor.id]
+    ),
+    pool.query(
+      `SELECT s.id, s.audit_date, s.status, l.area_name, l.location_name, b.binder_name
+         FROM audit_schedules s JOIN binders b ON b.id = s.binder_id JOIN locations l ON l.id = b.location_id
+        WHERE s.assigned_auditor_id = $1 AND s.audit_date >= current_date AND s.status IN ('scheduled', 'covered') ORDER BY s.audit_date, l.location_name`, [auditor.id]
+    ),
+    pool.query(
+      `SELECT r.id, r.note, s.audit_date, l.area_name, l.location_name, b.binder_name, sender.display_name AS sender_name
+         FROM audit_coverage_requests r JOIN audit_schedules s ON s.id = r.schedule_id JOIN binders b ON b.id = s.binder_id
+         JOIN locations l ON l.id = b.location_id JOIN auditors sender ON sender.id = r.requested_by
+        WHERE r.requested_to = $1 AND r.status = 'pending' ORDER BY s.audit_date, r.created_at`, [auditor.id]
+    ),
+    pool.query(
+      `SELECT a.display_name, x.start_date, x.end_date, x.note FROM auditor_absences x JOIN auditors a ON a.id = x.auditor_id
+        WHERE x.auditor_id <> $1 AND x.end_date >= current_date ORDER BY x.start_date, a.display_name`, [auditor.id]
     )
   ]);
   response.json({
@@ -191,7 +265,10 @@ app.get("/dashboard", requireAuth, async (request, response) => {
     ownedLocations: ownedLocations.rows.map((row) => ({ id: row.id, areaName: row.area_name, locationName: row.location_name })),
     receivedAudits: receivedAudits.rows.map((row) => ({ id: row.id, auditDate: row.audit_date, areaName: row.area_name, locationName: row.location_name, binderName: row.binder_name, auditorName: row.auditor_name, exceptionCount: Number(row.exception_count) })),
     incomingTransfers: incomingTransfers.rows.map((row) => ({ id: row.id, note: row.note, createdAt: row.created_at, areaName: row.area_name, locationName: row.location_name, senderName: row.sender_name })),
-    sentTransfers: sentTransfers.rows.map((row) => ({ id: row.id, status: row.status, createdAt: row.created_at, areaName: row.area_name, locationName: row.location_name, recipientName: row.recipient_name }))
+    sentTransfers: sentTransfers.rows.map((row) => ({ id: row.id, status: row.status, createdAt: row.created_at, areaName: row.area_name, locationName: row.location_name, recipientName: row.recipient_name })),
+    scheduledAudits: scheduledAudits.rows.map((row) => ({ id: row.id, auditDate: row.audit_date, status: row.status, areaName: row.area_name, locationName: row.location_name, binderName: row.binder_name })),
+    incomingCoverage: incomingCoverage.rows.map((row) => ({ id: row.id, note: row.note, auditDate: row.audit_date, areaName: row.area_name, locationName: row.location_name, binderName: row.binder_name, senderName: row.sender_name })),
+    absences: absences.rows.map((row) => ({ displayName: row.display_name, startDate: row.start_date, endDate: row.end_date, note: row.note }))
   });
 });
 
@@ -217,6 +294,8 @@ app.post("/audits", requireAuth, async (request, response) => {
   if (!binderId || !responses || responses.length !== sectionIds.length) return response.status(400).json({ error: "Every audit section is required." });
   const bySection = new Map(responses.map((item) => [item.sectionId, item]));
   if (sectionIds.some((section) => !bySection.has(section)) || responses.some((item) => !["current", "past", "missing"].includes(item.result) || (item.result !== "current" && !item.comment.trim()))) return response.status(400).json({ error: "Each section needs a valid result; past or missing evidence needs a comment." });
+  const scheduled = await pool.query("SELECT assigned_auditor_id FROM audit_schedules WHERE binder_id = $1 AND audit_date = current_date AND status IN ('scheduled', 'covered')", [binderId]);
+  if (scheduled.rows[0] && scheduled.rows[0].assigned_auditor_id !== authed(request).auditor.id) return response.status(403).json({ error: "This audit is scheduled for another auditor today." });
   try {
     const audit = await withTransaction(async (client) => {
       const created = await client.query("INSERT INTO audits (binder_id, auditor_id, audit_date, status, submitted_at) VALUES ($1, $2, current_date, 'submitted', now()) RETURNING id, audit_date", [binderId, authed(request).auditor.id]);
