@@ -42,6 +42,17 @@ nav button:hover { background: #e5ede1; }
 .profile-grid > .panel, .management-grid > .panel { height: 100%; }
 .audit-list > div { display: grid; gap: 7px; padding: 15px 0; }
 .audit-list button { justify-self: start; margin-top: 2px; }
+.audit-list > div > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 5px;
+}
+.audit-list > div > div:last-child button {
+  min-width: 96px;
+  margin: 0;
+  padding: 10px 16px;
+}
 .proposal { padding: 15px 0; }
 .proposal button { white-space: nowrap; }
 
