@@ -1,0 +1,26 @@
+.audit-date {
+  min-width: 150px;
+  padding: 4px 0;
+  text-align: right;
+  color: #506156;
+}
+
+.audit-date span {
+  display: block;
+  color: #6a786e;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.audit-date strong {
+  display: block;
+  margin-top: 5px;
+  color: #173d2d;
+  font-size: 15px;
+}
+
+@media (max-width: 620px) {
+  .audit-date { text-align: left; }
+}
