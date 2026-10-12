@@ -195,6 +195,22 @@ app.get("/dashboard", requireAuth, async (request, response) => {
   });
 });
 
+app.get("/audits/:auditId", requireAuth, async (request, response) => {
+  const { rows } = await pool.query(
+    `SELECT a.id, a.audit_date, l.owner_auditor_id, l.area_name, l.location_name, b.binder_name,
+            performed.id AS performed_by_id, performed.display_name AS auditor_name
+       FROM audits a JOIN binders b ON b.id = a.binder_id JOIN locations l ON l.id = b.location_id
+       JOIN auditors performed ON performed.id = a.auditor_id
+      WHERE a.id = $1 AND a.status = 'submitted'`, [request.params.auditId]
+  );
+  const audit = rows[0];
+  if (!audit) return response.status(404).json({ error: "Audit not found." });
+  const viewer = authed(request).auditor;
+  if (!viewer.isGodAdmin && audit.owner_auditor_id !== viewer.id && audit.performed_by_id !== viewer.id) return response.status(403).json({ error: "You are not allowed to review this audit." });
+  const responses = await pool.query("SELECT section_id, result, comment FROM audit_responses WHERE audit_id = $1 ORDER BY CASE section_id WHEN 'safety' THEN 1 WHEN 'opening' THEN 2 WHEN 'mid' THEN 3 WHEN 'closing' THEN 4 WHEN 'cooler' THEN 5 WHEN 'two-hour' THEN 6 WHEN 'protein' THEN 7 WHEN 'test' THEN 8 END", [audit.id]);
+  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, responses: responses.rows.map((row) => ({ sectionId: row.section_id, result: row.result, comment: row.comment })) });
+});
+
 app.post("/audits", requireAuth, async (request, response) => {
   if (!authed(request).auditor.canAudit) return response.status(403).json({ error: "God Admin accounts can view all audits but cannot submit an audit." });
   const { binderId, responses } = request.body as { binderId?: string; responses?: Array<{ sectionId: string; result: AuditResult; comment: string }> };
