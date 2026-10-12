@@ -4,7 +4,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { Pool, type PoolClient } from "pg";
 
 type AuditResult = "current" | "past" | "missing";
-type User = { id: string; displayName: string; email: string; isGodAdmin: boolean; canAudit: boolean };
+type User = { id: string; displayName: string; email: string; isGodAdmin: boolean; isLocationManager: boolean; canAudit: boolean };
 type AuthenticatedRequest = Request & { auditor: User; token: string };
 
 const app = express();
@@ -15,14 +15,14 @@ app.use(express.json());
 const authed = (request: Request) => request as AuthenticatedRequest;
 const userFromRow = (row: Record<string, unknown>): User => ({
   id: String(row.id), displayName: String(row.display_name), email: String(row.email),
-  isGodAdmin: Boolean(row.is_god_admin), canAudit: Boolean(row.can_audit)
+  isGodAdmin: Boolean(row.is_god_admin), isLocationManager: Boolean(row.is_location_manager), canAudit: Boolean(row.can_audit)
 });
 
 async function requireAuth(request: Request, response: Response, next: NextFunction) {
   const token = request.header("authorization")?.replace(/^Bearer\s+/i, "");
   if (!token) return response.status(401).json({ error: "Sign in is required." });
   const { rows } = await pool.query(
-    `SELECT a.id, a.display_name, a.email, a.is_god_admin, a.can_audit
+    `SELECT a.id, a.display_name, a.email, a.is_god_admin, a.is_location_manager, a.can_audit
        FROM auth_sessions s JOIN auditors a ON a.id = s.auditor_id
       WHERE s.token = $1 AND s.expires_at > now() AND a.active = true`, [token]
   );
@@ -37,6 +37,12 @@ function requireGodAdmin(request: Request, response: Response, next: NextFunctio
   next();
 }
 
+function requireLocationManager(request: Request, response: Response, next: NextFunction) {
+  const auditor = authed(request).auditor;
+  if (!auditor.isGodAdmin && !auditor.isLocationManager) return response.status(403).json({ error: "Only God Admins, Chuck, and Ken can assign locations." });
+  next();
+}
+
 async function withTransaction<T>(action: (client: PoolClient) => Promise<T>) {
   const client = await pool.connect();
   try { await client.query("BEGIN"); const result = await action(client); await client.query("COMMIT"); return result; }
@@ -47,15 +53,15 @@ async function withTransaction<T>(action: (client: PoolClient) => Promise<T>) {
 app.get("/health", async (_request, response) => { await pool.query("SELECT 1"); response.json({ status: "ok" }); });
 
 app.get("/auth/test-accounts", async (_request, response) => {
-  const { rows } = await pool.query("SELECT email, display_name, is_god_admin FROM auditors WHERE active = true ORDER BY display_name");
-  response.json(rows.map((row) => ({ email: row.email, displayName: row.display_name, isGodAdmin: row.is_god_admin })));
+  const { rows } = await pool.query("SELECT email, display_name, is_god_admin, is_location_manager FROM auditors WHERE active = true ORDER BY display_name");
+  response.json(rows.map((row) => ({ email: row.email, displayName: row.display_name, isGodAdmin: row.is_god_admin, isLocationManager: row.is_location_manager })));
 });
 
 app.post("/auth/login", async (request, response) => {
   const { email, password } = request.body as { email?: string; password?: string };
   if (!email?.toLowerCase().endsWith("@compass-usa.com") || !password) return response.status(400).json({ error: "Use a Compass email address and password." });
   const { rows } = await pool.query(
-    `SELECT id, display_name, email, is_god_admin, can_audit FROM auditors
+    `SELECT id, display_name, email, is_god_admin, is_location_manager, can_audit FROM auditors
       WHERE lower(email) = lower($1) AND active = true AND password_hash = crypt($2, password_hash)`, [email.trim(), password]
   );
   if (!rows[0]) return response.status(401).json({ error: "Email or password is not recognized." });
@@ -84,6 +90,17 @@ app.post("/locations", requireAuth, requireGodAdmin, async (request, response) =
     return created.rows[0];
   });
   response.status(201).json(location);
+});
+
+app.patch("/locations/:locationId/owner", requireAuth, requireLocationManager, async (request, response) => {
+  const { ownerAuditorId } = request.body as { ownerAuditorId?: string | null };
+  if (ownerAuditorId) {
+    const recipient = await pool.query("SELECT id FROM auditors WHERE id = $1 AND active = true AND can_audit = true", [ownerAuditorId]);
+    if (!recipient.rows[0]) return response.status(400).json({ error: "Choose an active auditor as the location owner." });
+  }
+  const { rows } = await pool.query("UPDATE locations SET owner_auditor_id = $1 WHERE id = $2 AND active = true RETURNING id", [ownerAuditorId || null, request.params.locationId]);
+  if (!rows[0]) return response.status(404).json({ error: "Location not found." });
+  response.status(204).end();
 });
 
 app.get("/auditors", requireAuth, async (_request, response) => {
