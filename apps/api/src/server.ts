@@ -10,7 +10,15 @@ type AuthenticatedRequest = Request & { auditor: User; token: string };
 const app = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const sectionIds = ["safety", "opening", "mid", "closing", "cooler", "two-hour", "protein", "test"];
-app.use(cors());
+const allowedOrigins = (process.env.CORS_ORIGIN ?? "").split(",").map((origin) => origin.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || process.env.NODE_ENV !== "production" || allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error("This browser origin is not permitted."));
+  },
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(express.json());
 const authed = (request: Request) => request as AuthenticatedRequest;
 const userFromRow = (row: Record<string, unknown>): User => ({
@@ -313,4 +321,5 @@ app.post("/audits", requireAuth, async (request, response) => {
 });
 
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => { console.error(error); response.status(500).json({ error: "Unexpected server error." }); });
-app.listen(Number(process.env.PORT ?? 3001), () => console.log("Handshake API listening on port 3001"));
+const port = Number(process.env.PORT ?? 3001);
+app.listen(port, () => console.log(`Handshake API listening on port ${port}`));

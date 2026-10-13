@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import "./audit-date.css";
 import "./polish.css";
 
-const apiUrl = "http://localhost:3001";
+const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 type Result = "current" | "past" | "missing";
 type Auditor = { id: string; displayName: string; email: string; isGodAdmin: boolean; isLocationManager: boolean; canAudit: boolean };
 type Binder = { id: string; binderName: string };

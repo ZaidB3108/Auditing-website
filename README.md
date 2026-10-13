@@ -23,3 +23,7 @@ The **Schedule & leave** tab supports dated daily-audit assignments, leave notic
 - `prod` is the stable release branch. Merge `dev` into `prod` only after review and deployment verification.
 
 Configure the Chartwells GitHub remote before the first push.
+
+## AWS deployment
+
+The application is ready to be deployed as a static React frontend with a containerized API and PostgreSQL database. Follow [the AWS deployment guide](docs/aws-deployment.md) to configure AWS resources and deployment environment variables. Do not deploy the current temporary-password authentication to a public production URL; Microsoft Entra ID must be configured first.
