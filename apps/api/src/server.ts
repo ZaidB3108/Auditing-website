@@ -9,6 +9,15 @@ type User = { id: string; displayName: string; email: string; isGodAdmin: boolea
 type AuthenticatedRequest = Request & { auditor: User; token: string };
 
 const app = express();
+// The public staging site uses the same HTTPS origin for the web app and API.
+// CloudFront forwards /api/* to this service; strip that external prefix so the
+// existing route definitions stay concise (for example, /api/auth/login -> /auth/login).
+app.use((request, _response, next) => {
+  if (request.url === "/api" || request.url.startsWith("/api/")) {
+    request.url = request.url.slice(4) || "/";
+  }
+  next();
+});
 const databaseUrl = process.env.DATABASE_URL;
 const requiredDatabaseVariable = (name: "PGHOST" | "PGDATABASE" | "PGUSER" | "PGPASSWORD") => {
   const value = process.env[name];
