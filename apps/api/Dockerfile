@@ -12,7 +12,7 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN apk add --no-cache ca-certificates curl \
+RUN apk add --no-cache ca-certificates curl postgresql-client \
   && curl --fail --show-error --silent https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
     --output /app/rds-global-bundle.pem
 
@@ -20,6 +20,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
+COPY src/db/migrations ./migrations
+COPY scripts/migrate.sh ./scripts/migrate.sh
+RUN chmod +x ./scripts/migrate.sh
 EXPOSE 3001
 
 CMD ["node", "dist/server.js"]

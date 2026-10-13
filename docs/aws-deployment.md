@@ -60,7 +60,7 @@ Keep the S3 bucket and RDS instance private. Use ACM certificates for both HTTPS
 
 1. Create RDS PostgreSQL in private subnets with automated backups, encryption, and deletion protection enabled.
 2. Create the `handshake_audit` database and a least-privilege application user.
-3. From an approved network path that can reach RDS (for example a managed admin host or one-off ECS task), run the SQL migrations in `apps/api/src/db/migrations` in numerical order.
+3. Before starting the API service, run a one-off ECS task in the same VPC and security group as the API with command override `/app/scripts/migrate.sh`. Inject the same RDS-managed credential fields as the API task. The command tracks applied migration filenames and is safe to rerun.
 4. Verify the API health endpoint through the load balancer after the migration completes.
 
 ## Frontend
