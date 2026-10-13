@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { readFileSync } from "node:fs";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { Pool, type PoolClient } from "pg";
@@ -8,7 +9,32 @@ type User = { id: string; displayName: string; email: string; isGodAdmin: boolea
 type AuthenticatedRequest = Request & { auditor: User; token: string };
 
 const app = express();
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const databaseUrl = process.env.DATABASE_URL;
+const requiredDatabaseVariable = (name: "PGHOST" | "PGDATABASE" | "PGUSER" | "PGPASSWORD") => {
+  const value = process.env[name];
+  if (!value) throw new Error(`Set DATABASE_URL or ${name} before starting the API.`);
+  return value;
+};
+const databaseSsl = (() => {
+  const mode = process.env.PGSSLMODE;
+  if (!mode) return undefined;
+  if (mode === "disable") return false;
+
+  const certificatePath = process.env.PGSSLROOTCERT;
+  if (!certificatePath) throw new Error("Set PGSSLROOTCERT when PGSSLMODE enables TLS certificate verification.");
+  return { rejectUnauthorized: true, ca: readFileSync(certificatePath, "utf8") };
+})();
+const pool = new Pool(databaseUrl
+  ? { connectionString: databaseUrl, ssl: databaseSsl }
+  : {
+      host: requiredDatabaseVariable("PGHOST"),
+      port: Number(process.env.PGPORT ?? 5432),
+      database: requiredDatabaseVariable("PGDATABASE"),
+      user: requiredDatabaseVariable("PGUSER"),
+      password: requiredDatabaseVariable("PGPASSWORD"),
+      // Set PGSSLMODE=disable only for a local PostgreSQL instance.
+      ssl: databaseSsl
+    });
 const sectionIds = ["safety", "opening", "mid", "closing", "cooler", "two-hour", "protein", "test"];
 const allowedOrigins = (process.env.CORS_ORIGIN ?? "").split(",").map((origin) => origin.trim()).filter(Boolean);
 app.use(cors({

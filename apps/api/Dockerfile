@@ -12,6 +12,10 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+RUN apk add --no-cache ca-certificates curl \
+  && curl --fail --show-error --silent https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    --output /app/rds-global-bundle.pem
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 

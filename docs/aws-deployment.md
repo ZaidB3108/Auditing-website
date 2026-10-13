@@ -41,14 +41,18 @@ Keep the S3 bucket and RDS instance private. Use ACM certificates for both HTTPS
    ```
 
 3. Run the image in an ECS Fargate service in private subnets. Attach an Application Load Balancer target group with health check path `/health` and container port `3001`.
-4. Store the production database URL as an AWS Secrets Manager secret. Inject it into the task as `DATABASE_URL`; never put it in GitHub, a Docker image, or a frontend build.
+4. Do not put database credentials in GitHub, a Docker image, or a frontend build. The API supports either a custom connection-string secret injected as `DATABASE_URL`, or the JSON fields of the RDS-managed secret injected as `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. The latter avoids copying a password into a second secret.
 5. Set these ECS environment variables:
 
    ```text
    NODE_ENV=production
    PORT=3001
    CORS_ORIGIN=https://audit.compass-usa.com
+   PGSSLMODE=verify-full
+   PGSSLROOTCERT=/app/rds-global-bundle.pem
    ```
+
+   The API image includes the current AWS RDS CA bundle. When using an RDS-managed master credential, choose each JSON key from that one Secrets Manager secret in the ECS task definition: `host` to `PGHOST`, `port` to `PGPORT`, `dbname` to `PGDATABASE`, `username` to `PGUSER`, and `password` to `PGPASSWORD`. This setup both encrypts the connection and verifies the RDS server certificate.
 
 6. Use an API task security group that accepts port 3001 only from the load balancer security group. Allow the RDS security group to accept port 5432 only from the API task security group.
 
