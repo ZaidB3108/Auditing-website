@@ -5,7 +5,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { Pool, type PoolClient } from "pg";
 
 type AuditResult = "current" | "past" | "missing";
-type User = { id: string; displayName: string; email: string; isGodAdmin: boolean; isLocationManager: boolean; canAudit: boolean };
+type User = { id: string; displayName: string; email: string; isGodAdmin: boolean; isLocationManager: boolean; canAudit: boolean; mustChangePassword: boolean };
 type AuthenticatedRequest = Request & { auditor: User; token: string };
 
 const app = express();
@@ -49,20 +49,28 @@ app.use(express.json());
 const authed = (request: Request) => request as AuthenticatedRequest;
 const userFromRow = (row: Record<string, unknown>): User => ({
   id: String(row.id), displayName: String(row.display_name), email: String(row.email),
-  isGodAdmin: Boolean(row.is_god_admin), isLocationManager: Boolean(row.is_location_manager), canAudit: Boolean(row.can_audit)
+  isGodAdmin: Boolean(row.is_god_admin), isLocationManager: Boolean(row.is_location_manager), canAudit: Boolean(row.can_audit),
+  mustChangePassword: Boolean(row.must_change_password)
 });
+
+const passwordError = (password: unknown) => {
+  if (typeof password !== "string" || password.length < 12) return "Use a password with at least 12 characters.";
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password) || !/[^A-Za-z0-9]/.test(password)) return "Use upper- and lower-case letters, a number, and a symbol.";
+  return null;
+};
 
 async function requireAuth(request: Request, response: Response, next: NextFunction) {
   const token = request.header("authorization")?.replace(/^Bearer\s+/i, "");
   if (!token) return response.status(401).json({ error: "Sign in is required." });
   const { rows } = await pool.query(
-    `SELECT a.id, a.display_name, a.email, a.is_god_admin, a.is_location_manager, a.can_audit
+    `SELECT a.id, a.display_name, a.email, a.is_god_admin, a.is_location_manager, a.can_audit, a.must_change_password
        FROM auth_sessions s JOIN auditors a ON a.id = s.auditor_id
       WHERE s.token = $1 AND s.expires_at > now() AND a.active = true`, [token]
   );
   if (!rows[0]) return response.status(401).json({ error: "Your session has expired. Please sign in again." });
   authed(request).token = token;
   authed(request).auditor = userFromRow(rows[0]);
+  if (authed(request).auditor.mustChangePassword && !["/auth/change-password", "/auth/logout"].includes(request.path)) return response.status(403).json({ error: "Change your temporary password before continuing." });
   next();
 }
 
@@ -86,21 +94,30 @@ async function withTransaction<T>(action: (client: PoolClient) => Promise<T>) {
 
 app.get("/health", async (_request, response) => { await pool.query("SELECT 1"); response.json({ status: "ok" }); });
 
-app.get("/auth/test-accounts", async (_request, response) => {
-  const { rows } = await pool.query("SELECT email, display_name, is_god_admin, is_location_manager FROM auditors WHERE active = true ORDER BY display_name");
-  response.json(rows.map((row) => ({ email: row.email, displayName: row.display_name, isGodAdmin: row.is_god_admin, isLocationManager: row.is_location_manager })));
-});
-
 app.post("/auth/login", async (request, response) => {
   const { email, password } = request.body as { email?: string; password?: string };
   if (!email?.toLowerCase().endsWith("@compass-usa.com") || !password) return response.status(400).json({ error: "Use a Compass email address and password." });
   const { rows } = await pool.query(
-    `SELECT id, display_name, email, is_god_admin, is_location_manager, can_audit FROM auditors
+    `SELECT id, display_name, email, is_god_admin, is_location_manager, can_audit, must_change_password FROM auditors
       WHERE lower(email) = lower($1) AND active = true AND password_hash = crypt($2, password_hash)`, [email.trim(), password]
   );
   if (!rows[0]) return response.status(401).json({ error: "Email or password is not recognized." });
   const session = await pool.query("INSERT INTO auth_sessions (auditor_id) VALUES ($1) RETURNING token", [rows[0].id]);
   response.json({ token: session.rows[0].token, auditor: userFromRow(rows[0]) });
+});
+
+app.post("/auth/change-password", requireAuth, async (request, response) => {
+  const { currentPassword, newPassword } = request.body as { currentPassword?: string; newPassword?: string };
+  const error = passwordError(newPassword);
+  if (error) return response.status(400).json({ error });
+  const { rows } = await pool.query(
+    `UPDATE auditors SET password_hash = crypt($2, gen_salt('bf')), must_change_password = false
+      WHERE id = $1 AND password_hash = crypt($3, password_hash)
+      RETURNING id, display_name, email, is_god_admin, is_location_manager, can_audit, must_change_password`,
+    [authed(request).auditor.id, newPassword, currentPassword]
+  );
+  if (!rows[0]) return response.status(400).json({ error: "Your current password is not correct." });
+  response.json({ auditor: userFromRow(rows[0]) });
 });
 
 app.post("/auth/logout", requireAuth, async (request, response) => { await pool.query("DELETE FROM auth_sessions WHERE token = $1", [authed(request).token]); response.status(204).end(); });
@@ -145,10 +162,13 @@ app.get("/auditors", requireAuth, async (_request, response) => {
 app.post("/auditors", requireAuth, requireGodAdmin, async (request, response) => {
   const { displayName, email } = request.body as { displayName?: string; email?: string };
   if (!displayName?.trim() || !email?.toLowerCase().endsWith("@compass-usa.com")) return response.status(400).json({ error: "Provide a name and Compass email address." });
+  const initialPassword = process.env.INITIAL_AUDITOR_PASSWORD ?? (process.env.NODE_ENV === "production" ? "" : "AuditTest!2026");
+  if (!initialPassword) return response.status(500).json({ error: "The staging initial-password secret has not been configured." });
   try {
     const { rows } = await pool.query(
-      `INSERT INTO auditors (display_name, email, password_hash, can_audit) VALUES ($1, lower($2), crypt('AuditTest!2026', gen_salt('bf')), true)
-       RETURNING id, display_name, email`, [displayName.trim(), email.trim()]
+      `INSERT INTO auditors (display_name, email, password_hash, can_audit, must_change_password, initial_password_set_at)
+       VALUES ($1, lower($2), crypt($3, gen_salt('bf')), true, true, now())
+       RETURNING id, display_name, email`, [displayName.trim(), email.trim(), initialPassword]
     );
     response.status(201).json({ id: rows[0].id, displayName: rows[0].display_name, email: rows[0].email, canAudit: true });
   } catch { response.status(409).json({ error: "That email already has an account." }); }

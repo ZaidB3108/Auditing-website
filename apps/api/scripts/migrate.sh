@@ -36,4 +36,14 @@ for migration in /app/migrations/*.sql; do
     --command "INSERT INTO schema_migrations (filename) VALUES ('$filename_sql');"
 done
 
+if [ -n "${INITIAL_AUDITOR_PASSWORD:-}" ]; then
+  initial_password_sql="$(printf '%s' "$INITIAL_AUDITOR_PASSWORD" | sed "s/'/''/g")"
+  psql -v ON_ERROR_STOP=1 --command "
+    UPDATE auditors
+       SET password_hash = crypt('$initial_password_sql', gen_salt('bf')),
+           must_change_password = true,
+           initial_password_set_at = now()
+     WHERE active = true AND initial_password_set_at IS NULL;"
+fi
+
 echo "Database migrations completed successfully."
