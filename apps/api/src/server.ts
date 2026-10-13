@@ -172,16 +172,19 @@ app.post("/auditor-absences", requireAuth, async (request, response) => {
   response.status(201).json(rows[0]);
 });
 
-app.post("/audit-schedules", requireAuth, requireLocationManager, async (request, response) => {
+app.post("/audit-schedules", requireAuth, async (request, response) => {
   const { binderId, auditDate, assignedAuditorId } = request.body as { binderId?: string; auditDate?: string; assignedAuditorId?: string };
-  if (!binderId || !assignedAuditorId || !/^\d{4}-\d{2}-\d{2}$/.test(auditDate ?? "")) return response.status(400).json({ error: "Binder, audit date, and assigned auditor are required." });
+  const creator = authed(request).auditor;
+  const canScheduleForOthers = creator.isGodAdmin || creator.isLocationManager;
+  const targetAuditorId = canScheduleForOthers ? assignedAuditorId : creator.id;
+  if (!binderId || !targetAuditorId || !/^\d{4}-\d{2}-\d{2}$/.test(auditDate ?? "")) return response.status(400).json({ error: "Binder and audit date are required." });
   const assignment = await pool.query(
     `SELECT b.id FROM binders b JOIN locations l ON l.id = b.location_id JOIN auditors a ON a.id = $2
-      WHERE b.id = $1 AND l.active = true AND a.active = true AND a.can_audit = true AND (l.owner_auditor_id IS NULL OR l.owner_auditor_id <> a.id)`, [binderId, assignedAuditorId]
+      WHERE b.id = $1 AND l.active = true AND a.active = true AND a.can_audit = true AND (l.owner_auditor_id IS NULL OR l.owner_auditor_id <> a.id)`, [binderId, targetAuditorId]
   );
   if (!assignment.rows[0]) return response.status(400).json({ error: "Choose an active auditor who does not own this location." });
   try {
-    const { rows } = await pool.query("INSERT INTO audit_schedules (binder_id, audit_date, assigned_auditor_id, created_by) VALUES ($1, $2, $3, $4) RETURNING id", [binderId, auditDate, assignedAuditorId, authed(request).auditor.id]);
+    const { rows } = await pool.query("INSERT INTO audit_schedules (binder_id, audit_date, assigned_auditor_id, created_by) VALUES ($1, $2, $3, $4) RETURNING id", [binderId, auditDate, targetAuditorId, creator.id]);
     response.status(201).json(rows[0]);
   } catch { response.status(409).json({ error: "This binder already has an audit scheduled for that date." }); }
 });

@@ -15,7 +15,7 @@ For local testing, the seeded auditor and God Admin accounts use their listed `@
 
 Chuck and Ken can assign or reassign existing locations from the **Assignments** tab. They cannot add or remove auditors.
 
-The **Schedule & leave** tab supports dated daily-audit assignments, leave notices visible to other auditors, and coverage requests. God Admins, Chuck, and Ken can create schedules; the assigned auditor can request temporary coverage from another auditor.
+The **Schedule & leave** tab supports dated daily-audit assignments, leave notices visible to other auditors, and coverage requests. Auditors can add an eligible audit to their own schedule; God Admins, Chuck, and Ken can also schedule audits for other auditors. Any assigned auditor can request temporary coverage from another auditor.
 
 ## Branching
 
