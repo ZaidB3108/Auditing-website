@@ -19,8 +19,11 @@ psql -v ON_ERROR_STOP=1 --quiet --command '
 
 for migration in /app/migrations/*.sql; do
   filename="$(basename "$migration")"
-  applied="$(psql -v filename="$filename" --quiet --tuples-only --no-align \
-    --command "SELECT 1 FROM schema_migrations WHERE filename = :'filename';")"
+  # Migration names are repository-controlled, but quote them before placing them
+  # in the SQL literal so this remains safe if a future filename contains an apostrophe.
+  filename_sql="$(printf '%s' "$filename" | sed "s/'/''/g")"
+  applied="$(psql --quiet --tuples-only --no-align \
+    --command "SELECT 1 FROM schema_migrations WHERE filename = '$filename_sql';")"
 
   if [ "$applied" = "1" ]; then
     echo "Already applied: $filename"
@@ -29,8 +32,8 @@ for migration in /app/migrations/*.sql; do
 
   echo "Applying: $filename"
   psql -v ON_ERROR_STOP=1 --single-transaction --file "$migration"
-  psql -v ON_ERROR_STOP=1 -v filename="$filename" \
-    --command "INSERT INTO schema_migrations (filename) VALUES (:'filename');"
+  psql -v ON_ERROR_STOP=1 \
+    --command "INSERT INTO schema_migrations (filename) VALUES ('$filename_sql');"
 done
 
 echo "Database migrations completed successfully."
