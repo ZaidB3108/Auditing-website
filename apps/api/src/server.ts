@@ -164,8 +164,25 @@ app.patch("/locations/:locationId/owner", requireAuth, requireLocationManager, a
 });
 
 app.get("/auditors", requireAuth, async (_request, response) => {
-  const { rows } = await pool.query("SELECT id, display_name, email FROM auditors WHERE active = true AND can_audit = true ORDER BY display_name");
-  response.json(rows.map((row) => ({ id: row.id, displayName: row.display_name, email: row.email, canAudit: true })));
+  const { rows } = await pool.query("SELECT id, display_name, email, is_god_admin, is_location_manager, can_audit, must_change_password FROM auditors WHERE active = true AND can_audit = true ORDER BY display_name");
+  response.json(rows.map(userFromRow));
+});
+
+app.patch("/auditors/:auditorId/god-admin", requireAuth, requireGodAdmin, async (request, response) => {
+  const { isGodAdmin } = request.body as { isGodAdmin?: boolean };
+  if (typeof isGodAdmin !== "boolean") return response.status(400).json({ error: "Choose whether this auditor should be a God Admin." });
+  const target = await pool.query("SELECT id, is_god_admin FROM auditors WHERE id = $1 AND active = true", [request.params.auditorId]);
+  if (!target.rows[0]) return response.status(404).json({ error: "Active auditor not found." });
+  if (!isGodAdmin && target.rows[0].is_god_admin) {
+    const count = await pool.query("SELECT count(*) FROM auditors WHERE active = true AND is_god_admin = true");
+    if (Number(count.rows[0].count) <= 1) return response.status(400).json({ error: "Keep at least one active God Admin." });
+  }
+  const { rows } = await pool.query(
+    `UPDATE auditors SET is_god_admin = $1, can_audit = true WHERE id = $2
+      RETURNING id, display_name, email, is_god_admin, is_location_manager, can_audit, must_change_password`,
+    [isGodAdmin, request.params.auditorId]
+  );
+  response.json({ auditor: userFromRow(rows[0]) });
 });
 
 app.post("/auditors", requireAuth, requireGodAdmin, async (request, response) => {
@@ -294,7 +311,7 @@ app.get("/dashboard", requireAuth, async (request, response) => {
   const scope = auditor.isGodAdmin ? { where: "a.status = 'submitted'", values: [] as string[] } : { where: "l.owner_auditor_id = $1 AND a.status = 'submitted' AND a.auditor_id <> $1", values: [auditor.id] };
   const receivedAudits = await pool.query(
     `SELECT a.id, a.audit_date, l.area_name, l.location_name, b.binder_name, performed.display_name AS auditor_name,
-            count(r.section_id) FILTER (WHERE r.result <> 'current') AS exception_count
+             count(r.section_id) FILTER (WHERE 'missing' = ANY(coalesce(r.selected_results, ARRAY[r.result]))) AS exception_count
        FROM audits a JOIN binders b ON b.id = a.binder_id JOIN locations l ON l.id = b.location_id
        JOIN auditors performed ON performed.id = a.auditor_id LEFT JOIN audit_responses r ON r.audit_id = a.id
       WHERE ${scope.where} GROUP BY a.id, l.area_name, l.location_name, b.binder_name, performed.display_name ORDER BY a.audit_date DESC, a.created_at DESC`, scope.values
@@ -350,22 +367,28 @@ app.get("/audits/:auditId", requireAuth, async (request, response) => {
   if (!audit) return response.status(404).json({ error: "Audit not found." });
   const viewer = authed(request).auditor;
   if (!viewer.isGodAdmin && audit.owner_auditor_id !== viewer.id && audit.performed_by_id !== viewer.id) return response.status(403).json({ error: "You are not allowed to review this audit." });
-  const responses = await pool.query("SELECT section_id, result, comment FROM audit_responses WHERE audit_id = $1 ORDER BY CASE section_id WHEN 'safety' THEN 1 WHEN 'opening' THEN 2 WHEN 'mid' THEN 3 WHEN 'closing' THEN 4 WHEN 'cooler' THEN 5 WHEN 'two-hour' THEN 6 WHEN 'protein' THEN 7 WHEN 'test' THEN 8 END", [audit.id]);
-  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, responses: responses.rows.map((row) => ({ sectionId: row.section_id, result: row.result, comment: row.comment })) });
+  const responses = await pool.query("SELECT section_id, result, selected_results, comment FROM audit_responses WHERE audit_id = $1 ORDER BY CASE section_id WHEN 'safety' THEN 1 WHEN 'opening' THEN 2 WHEN 'mid' THEN 3 WHEN 'closing' THEN 4 WHEN 'cooler' THEN 5 WHEN 'two-hour' THEN 6 WHEN 'protein' THEN 7 WHEN 'test' THEN 8 END", [audit.id]);
+  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, responses: responses.rows.map((row) => ({ sectionId: row.section_id, results: row.selected_results ?? [row.result], comment: row.comment })) });
 });
 
 app.post("/audits", requireAuth, async (request, response) => {
-  if (!authed(request).auditor.canAudit) return response.status(403).json({ error: "God Admin accounts can view all audits but cannot submit an audit." });
-  const { binderId, responses } = request.body as { binderId?: string; responses?: Array<{ sectionId: string; result: AuditResult; comment: string }> };
+  if (!authed(request).auditor.canAudit) return response.status(403).json({ error: "Only active auditors can submit an audit." });
+  const { binderId, responses } = request.body as { binderId?: string; responses?: Array<{ sectionId: string; results: AuditResult[]; comment: string }> };
   if (!binderId || !responses || responses.length !== sectionIds.length) return response.status(400).json({ error: "Every audit section is required." });
   const bySection = new Map(responses.map((item) => [item.sectionId, item]));
-  if (sectionIds.some((section) => !bySection.has(section)) || responses.some((item) => !["current", "past", "missing"].includes(item.result) || (item.result !== "current" && !item.comment.trim()))) return response.status(400).json({ error: "Each section needs a valid result; past or missing evidence needs a comment." });
+  if (sectionIds.some((section) => !bySection.has(section)) || responses.some((item) => {
+    const results = item.results;
+    return !Array.isArray(results) || results.length !== 2 || new Set(results).size !== 2 || results.some((result) => !["current", "past", "missing"].includes(result)) || (results.includes("missing") && !item.comment?.trim());
+  })) return response.status(400).json({ error: "Select exactly two statuses for every section. A comment is required whenever Missing is selected." });
   const scheduled = await pool.query("SELECT assigned_auditor_id FROM audit_schedules WHERE binder_id = $1 AND audit_date = current_date AND status IN ('scheduled', 'covered')", [binderId]);
   if (scheduled.rows[0] && scheduled.rows[0].assigned_auditor_id !== authed(request).auditor.id) return response.status(403).json({ error: "This audit is scheduled for another auditor today." });
   try {
     const audit = await withTransaction(async (client) => {
       const created = await client.query("INSERT INTO audits (binder_id, auditor_id, audit_date, status, submitted_at) VALUES ($1, $2, current_date, 'submitted', now()) RETURNING id, audit_date", [binderId, authed(request).auditor.id]);
-      for (const item of responses) await client.query("INSERT INTO audit_responses (audit_id, section_id, result, comment) VALUES ($1, $2, $3, $4)", [created.rows[0].id, item.sectionId, item.result, item.comment.trim()]);
+       for (const item of responses) {
+         const summaryResult = item.results.includes("missing") ? "missing" : "current";
+         await client.query("INSERT INTO audit_responses (audit_id, section_id, result, selected_results, comment) VALUES ($1, $2, $3, $4, $5)", [created.rows[0].id, item.sectionId, summaryResult, item.results, item.comment.trim()]);
+       }
       return created.rows[0];
     });
     response.status(201).json({ id: audit.id, auditDate: audit.audit_date });
