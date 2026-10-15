@@ -4,7 +4,7 @@ import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { Pool, type PoolClient } from "pg";
 
-type AuditResult = "current" | "past" | "missing";
+type AuditResult = "current" | "past" | "missing" | "not_applicable";
 type User = { id: string; displayName: string; email: string; isGodAdmin: boolean; isLocationManager: boolean; canAudit: boolean; mustChangePassword: boolean };
 type AuthenticatedRequest = Request & { auditor: User; token: string };
 
@@ -357,7 +357,7 @@ app.get("/dashboard", requireAuth, async (request, response) => {
 
 app.get("/audits/:auditId", requireAuth, async (request, response) => {
   const { rows } = await pool.query(
-    `SELECT a.id, a.audit_date, l.owner_auditor_id, l.area_name, l.location_name, b.binder_name,
+    `SELECT a.id, a.audit_date, a.overall_comment, l.owner_auditor_id, l.area_name, l.location_name, b.binder_name,
             performed.id AS performed_by_id, performed.display_name AS auditor_name
        FROM audits a JOIN binders b ON b.id = a.binder_id JOIN locations l ON l.id = b.location_id
        JOIN auditors performed ON performed.id = a.auditor_id
@@ -368,25 +368,27 @@ app.get("/audits/:auditId", requireAuth, async (request, response) => {
   const viewer = authed(request).auditor;
   if (!viewer.isGodAdmin && audit.owner_auditor_id !== viewer.id && audit.performed_by_id !== viewer.id) return response.status(403).json({ error: "You are not allowed to review this audit." });
   const responses = await pool.query("SELECT section_id, result, selected_results, comment FROM audit_responses WHERE audit_id = $1 ORDER BY CASE section_id WHEN 'safety' THEN 1 WHEN 'opening' THEN 2 WHEN 'mid' THEN 3 WHEN 'closing' THEN 4 WHEN 'cooler' THEN 5 WHEN 'two-hour' THEN 6 WHEN 'protein' THEN 7 WHEN 'test' THEN 8 END", [audit.id]);
-  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, responses: responses.rows.map((row) => ({ sectionId: row.section_id, results: row.selected_results ?? [row.result], comment: row.comment })) });
+  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, overallComment: audit.overall_comment, responses: responses.rows.map((row) => ({ sectionId: row.section_id, results: row.selected_results ?? [row.result], comment: row.comment })) });
 });
 
 app.post("/audits", requireAuth, async (request, response) => {
   if (!authed(request).auditor.canAudit) return response.status(403).json({ error: "Only active auditors can submit an audit." });
-  const { binderId, responses } = request.body as { binderId?: string; responses?: Array<{ sectionId: string; results: AuditResult[]; comment: string }> };
+  const { binderId, responses, overallComment } = request.body as { binderId?: string; responses?: Array<{ sectionId: string; results: AuditResult[]; comment: string }>; overallComment?: string };
   if (!binderId || !responses || responses.length !== sectionIds.length) return response.status(400).json({ error: "Every audit section is required." });
   const bySection = new Map(responses.map((item) => [item.sectionId, item]));
   if (sectionIds.some((section) => !bySection.has(section)) || responses.some((item) => {
     const results = item.results;
-    return !Array.isArray(results) || results.length !== 2 || new Set(results).size !== 2 || results.some((result) => !["current", "past", "missing"].includes(result)) || (results.includes("missing") && !item.comment?.trim());
-  })) return response.status(400).json({ error: "Select exactly two statuses for every section. A comment is required whenever Missing is selected." });
+    const isNotApplicable = Array.isArray(results) && results.length === 1 && results[0] === "not_applicable";
+    const hasTwoEvidenceStatuses = Array.isArray(results) && results.length === 2 && new Set(results).size === 2 && results.every((result) => ["current", "past", "missing"].includes(result));
+    return (!isNotApplicable && !hasTwoEvidenceStatuses) || (results.includes("missing") && !item.comment?.trim());
+  })) return response.status(400).json({ error: "Select exactly two evidence statuses, or Not applicable, for every section. A comment is required whenever Missing is selected." });
   const scheduled = await pool.query("SELECT assigned_auditor_id FROM audit_schedules WHERE binder_id = $1 AND audit_date = current_date AND status IN ('scheduled', 'covered')", [binderId]);
   if (scheduled.rows[0] && scheduled.rows[0].assigned_auditor_id !== authed(request).auditor.id) return response.status(403).json({ error: "This audit is scheduled for another auditor today." });
   try {
     const audit = await withTransaction(async (client) => {
-      const created = await client.query("INSERT INTO audits (binder_id, auditor_id, audit_date, status, submitted_at) VALUES ($1, $2, current_date, 'submitted', now()) RETURNING id, audit_date", [binderId, authed(request).auditor.id]);
+      const created = await client.query("INSERT INTO audits (binder_id, auditor_id, audit_date, status, submitted_at, overall_comment) VALUES ($1, $2, current_date, 'submitted', now(), $3) RETURNING id, audit_date", [binderId, authed(request).auditor.id, overallComment?.trim() || null]);
        for (const item of responses) {
-         const summaryResult = item.results.includes("missing") ? "missing" : "current";
+         const summaryResult = item.results.includes("not_applicable") ? "not_applicable" : item.results.includes("missing") ? "missing" : "current";
          await client.query("INSERT INTO audit_responses (audit_id, section_id, result, selected_results, comment) VALUES ($1, $2, $3, $4, $5)", [created.rows[0].id, item.sectionId, summaryResult, item.results, item.comment.trim()]);
        }
       return created.rows[0];

@@ -64,6 +64,8 @@ nav button:hover { background: #e5ede1; }
 .choice input { accent-color: currentColor; margin: 0; }
 .choice:has(input:disabled) { cursor: not-allowed; opacity: .55; }
 .comment textarea { min-height: 78px; }
+.overall-comment { display: grid; gap: 8px; margin: 24px 0 0; padding-top: 20px; border-top: 1px solid var(--line); }
+.overall-comment textarea { min-height: 110px; }
 footer { padding: 24px 0 4px; }
 
 @media (max-width: 620px) {
