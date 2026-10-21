@@ -376,12 +376,12 @@ app.post("/audits", requireAuth, async (request, response) => {
   const { binderId, responses, overallComment } = request.body as { binderId?: string; responses?: Array<{ sectionId: string; results: AuditResult[]; comment: string }>; overallComment?: string };
   if (!binderId || !responses || responses.length !== sectionIds.length) return response.status(400).json({ error: "Every audit section is required." });
   const bySection = new Map(responses.map((item) => [item.sectionId, item]));
-  if (sectionIds.some((section) => !bySection.has(section)) || responses.some((item) => {
-    const results = item.results;
-    const isNotApplicable = Array.isArray(results) && results.length === 1 && results[0] === "not_applicable";
-    const hasTwoEvidenceStatuses = Array.isArray(results) && results.length === 2 && new Set(results).size === 2 && results.every((result) => ["current", "past", "missing"].includes(result));
-    return (!isNotApplicable && !hasTwoEvidenceStatuses) || (results.includes("missing") && !item.comment?.trim());
-  })) return response.status(400).json({ error: "Select exactly two evidence statuses, or Not applicable, for every section. A comment is required whenever Missing is selected." });
+  const allowedResults: AuditResult[] = ["current", "past", "missing", "not_applicable"];
+  if (sectionIds.some((section) => !bySection.has(section)) || responses.some((item) =>
+    !Array.isArray(item.results)
+    || item.results.some((result) => !allowedResults.includes(result))
+    || new Set(item.results).size !== item.results.length
+  )) return response.status(400).json({ error: "Audit statuses must be valid and cannot be selected more than once per section." });
   const scheduled = await pool.query("SELECT assigned_auditor_id FROM audit_schedules WHERE binder_id = $1 AND audit_date = current_date AND status IN ('scheduled', 'covered')", [binderId]);
   if (scheduled.rows[0] && scheduled.rows[0].assigned_auditor_id !== authed(request).auditor.id) return response.status(403).json({ error: "This audit is scheduled for another auditor today." });
   try {
