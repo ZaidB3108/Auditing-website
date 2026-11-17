@@ -196,6 +196,33 @@ app.patch("/auditors/:auditorId/god-admin", requireAuth, requireGodAdmin, async 
   response.json({ auditor: userFromRow(rows[0]) });
 });
 
+app.post("/auditors/:auditorId/reset-password", requireAuth, requireGodAdmin, async (request, response) => {
+  response.setHeader("Cache-Control", "no-store");
+  const admin = authed(request).auditor;
+  if (admin.email.toLowerCase() !== "zaid.basri@compass-usa.com") return response.status(403).json({ error: "Only Chartwells Admin can reset passwords." });
+  const { adminPassword, temporaryPassword } = request.body as { adminPassword?: string; temporaryPassword?: string };
+  const error = passwordError(temporaryPassword);
+  if (error) return response.status(400).json({ error });
+  if (Buffer.byteLength(temporaryPassword!, "utf8") > 72) return response.status(400).json({ error: "Use a temporary password no longer than 72 bytes." });
+  if (typeof adminPassword !== "string" || !adminPassword) return response.status(400).json({ error: "Enter your current Chartwells Admin password to confirm." });
+  if (request.params.auditorId === admin.id) return response.status(400).json({ error: "Use Change password to change your own password." });
+  const result = await withTransaction(async (client) => {
+    const verified = await client.query("SELECT id FROM auditors WHERE id = $1 AND active = true AND password_hash = crypt($2, password_hash) FOR UPDATE", [admin.id, adminPassword]);
+    if (!verified.rows[0]) return "unverified";
+    const updated = await client.query(
+      `UPDATE auditors SET password_hash = crypt($2, gen_salt('bf')), must_change_password = true,
+         initial_password_set_at = now() WHERE id = $1 AND active = true RETURNING id`,
+      [request.params.auditorId, temporaryPassword]
+    );
+    if (!updated.rows[0]) return "missing";
+    await client.query("DELETE FROM auth_sessions WHERE auditor_id = $1", [request.params.auditorId]);
+    return "reset";
+  });
+  if (result === "unverified") return response.status(403).json({ error: "Your Chartwells Admin password is incorrect." });
+  if (result === "missing") return response.status(404).json({ error: "Active account not found." });
+  response.status(204).end();
+});
+
 app.post("/auditors", requireAuth, requireGodAdmin, async (request, response) => {
   const { displayName, email } = request.body as { displayName?: string; email?: string };
   if (!displayName?.trim() || !email?.toLowerCase().endsWith("@compass-usa.com")) return response.status(400).json({ error: "Provide a name and Compass email address." });

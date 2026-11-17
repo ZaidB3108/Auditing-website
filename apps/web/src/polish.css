@@ -66,6 +66,11 @@ nav button:hover { background: #e5ede1; }
 .comment textarea { min-height: 78px; }
 .overall-comment { display: grid; gap: 8px; margin: 24px 0 0; padding-top: 20px; border-top: 1px solid var(--line); }
 .overall-comment textarea { min-height: 110px; }
+.password-reset fieldset { display: grid; gap: 14px; max-width: 620px; }
+.password-reset label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
+.password-reset input, .password-reset select { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: white; }
+.password-reset small { color: #637168; }
+.password-reset button { justify-self: start; }
 footer { padding: 24px 0 4px; }
 
 @media (max-width: 620px) {
