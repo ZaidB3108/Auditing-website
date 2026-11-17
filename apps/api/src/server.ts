@@ -88,9 +88,12 @@ function requireGodAdmin(request: Request, response: Response, next: NextFunctio
   next();
 }
 
+const canAssignLocations = (auditor: User) =>
+  ["zaid.basri@compass-usa.com", "charles.weaver@compass-usa.com"].includes(auditor.email.toLowerCase());
+
 function requireLocationManager(request: Request, response: Response, next: NextFunction) {
   const auditor = authed(request).auditor;
-  if (!auditor.isGodAdmin && !auditor.isLocationManager) return response.status(403).json({ error: "Only Admins, Chuck, and Ken can assign locations." });
+  if (!canAssignLocations(auditor)) return response.status(403).json({ error: "Only Chartwells Admin and Chuck can assign locations." });
   next();
 }
 
@@ -131,18 +134,26 @@ app.post("/auth/change-password", requireAuth, async (request, response) => {
 
 app.post("/auth/logout", requireAuth, async (request, response) => { await pool.query("DELETE FROM auth_sessions WHERE token = $1", [authed(request).token]); response.status(204).end(); });
 
-app.get("/locations", requireAuth, async (_request, response) => {
+app.get("/locations", requireAuth, async (request, response) => {
   const { rows } = await pool.query(
     `SELECT l.id, l.area_name, l.location_name, l.owner_auditor_id, owner.display_name AS owner_name,
             coalesce(json_agg(json_build_object('id', b.id, 'binderName', b.binder_name) ORDER BY b.binder_name) FILTER (WHERE b.id IS NOT NULL), '[]') AS binders
        FROM locations l LEFT JOIN auditors owner ON owner.id = l.owner_auditor_id LEFT JOIN binders b ON b.location_id = l.id
       WHERE l.active = true GROUP BY l.id, owner.display_name ORDER BY l.area_name, l.location_name`
   );
-  response.json(rows.map((row) => ({ id: row.id, areaName: row.area_name, locationName: row.location_name, ownerAuditorId: row.owner_auditor_id, ownerName: row.owner_name ?? "Unassigned", binders: row.binders })));
+  const schedules = await pool.query("SELECT binder_id, assigned_auditor_id, status FROM audit_schedules WHERE audit_date = current_date AND status IN ('scheduled', 'covered')");
+  const byBinder = new Map(schedules.rows.map((row) => [row.binder_id, row]));
+  const viewer = authed(request).auditor;
+  response.json(rows.map((row) => ({ id: row.id, areaName: row.area_name, locationName: row.location_name, ownerAuditorId: row.owner_auditor_id, ownerName: row.owner_name ?? "Unassigned", binders: row.binders.map((binder: { id: string; binderName: string }) => {
+    const schedule = byBinder.get(binder.id);
+    const assigned = row.owner_auditor_id === viewer.id || (schedule?.status === 'covered' && schedule.assigned_auditor_id === viewer.id);
+    return { ...binder, canAudit: viewer.canAudit && assigned && (!schedule || schedule.assigned_auditor_id === viewer.id) };
+  }) })));
 });
 
 app.post("/locations", requireAuth, requireGodAdmin, async (request, response) => {
   const { areaName, locationName, binderName, ownerAuditorId } = request.body as { areaName?: string; locationName?: string; binderName?: string; ownerAuditorId?: string };
+  if (ownerAuditorId && !canAssignLocations(authed(request).auditor)) return response.status(403).json({ error: "Only Chartwells Admin and Chuck can assign locations." });
   if (!areaName?.trim() || !locationName?.trim() || !binderName?.trim()) return response.status(400).json({ error: "Area, location, and binder are required." });
   const location = await withTransaction(async (client) => {
     const created = await client.query("INSERT INTO locations (area_name, location_name, owner_auditor_id) VALUES ($1, $2, $3) RETURNING id", [areaName.trim(), locationName.trim(), ownerAuditorId || null]);
@@ -156,7 +167,7 @@ app.patch("/locations/:locationId/owner", requireAuth, requireLocationManager, a
   const { ownerAuditorId } = request.body as { ownerAuditorId?: string | null };
   if (ownerAuditorId) {
     const recipient = await pool.query("SELECT id FROM auditors WHERE id = $1 AND active = true AND can_audit = true", [ownerAuditorId]);
-    if (!recipient.rows[0]) return response.status(400).json({ error: "Choose an active auditor as the location owner." });
+    if (!recipient.rows[0]) return response.status(400).json({ error: "Choose an active auditor for this assignment." });
   }
   const { rows } = await pool.query("UPDATE locations SET owner_auditor_id = $1 WHERE id = $2 AND active = true RETURNING id", [ownerAuditorId || null, request.params.locationId]);
   if (!rows[0]) return response.status(404).json({ error: "Location not found." });
@@ -231,7 +242,9 @@ app.post("/audit-transfer-requests/:requestId/decision", requireAuth, async (req
   if (!auditor.canAudit) return response.status(403).json({ error: "Only active auditors can respond to a transfer." });
   const transfer = await withTransaction(async (client) => {
     const pending = await client.query(
-      "SELECT id, location_id FROM audit_responsibility_transfers WHERE id = $1 AND requested_to = $2 AND status = 'pending' FOR UPDATE",
+      `SELECT t.id, t.location_id FROM audit_responsibility_transfers t JOIN locations l ON l.id = t.location_id
+        WHERE t.id = $1 AND t.requested_to = $2 AND t.status = 'pending'
+          AND l.active = true AND l.owner_auditor_id = t.requested_by FOR UPDATE OF t, l`,
       [request.params.requestId, auditor.id]
     );
     if (!pending.rows[0]) return null;
@@ -255,14 +268,14 @@ app.post("/auditor-absences", requireAuth, async (request, response) => {
 app.post("/audit-schedules", requireAuth, async (request, response) => {
   const { binderId, auditDate, assignedAuditorId } = request.body as { binderId?: string; auditDate?: string; assignedAuditorId?: string };
   const creator = authed(request).auditor;
-  const canScheduleForOthers = creator.isGodAdmin || creator.isLocationManager;
+  const canScheduleForOthers = canAssignLocations(creator);
   const targetAuditorId = canScheduleForOthers ? assignedAuditorId : creator.id;
   if (!binderId || !targetAuditorId || !/^\d{4}-\d{2}-\d{2}$/.test(auditDate ?? "")) return response.status(400).json({ error: "Binder and audit date are required." });
   const assignment = await pool.query(
     `SELECT b.id FROM binders b JOIN locations l ON l.id = b.location_id JOIN auditors a ON a.id = $2
-      WHERE b.id = $1 AND l.active = true AND a.active = true AND a.can_audit = true AND (l.owner_auditor_id IS NULL OR l.owner_auditor_id <> a.id)`, [binderId, targetAuditorId]
+      WHERE b.id = $1 AND l.active = true AND a.active = true AND a.can_audit = true AND l.owner_auditor_id = a.id`, [binderId, targetAuditorId]
   );
-  if (!assignment.rows[0]) return response.status(400).json({ error: "Choose an active auditor who does not own this location." });
+  if (!assignment.rows[0]) return response.status(400).json({ error: "Schedule the auditor assigned to this location." });
   try {
     const { rows } = await pool.query("INSERT INTO audit_schedules (binder_id, audit_date, assigned_auditor_id, created_by) VALUES ($1, $2, $3, $4) RETURNING id", [binderId, auditDate, targetAuditorId, creator.id]);
     response.status(201).json(rows[0]);
@@ -290,12 +303,12 @@ app.post("/audit-coverage-requests/:requestId/decision", requireAuth, async (req
   const result = await withTransaction(async (client) => {
     const pending = await client.query(
       `SELECT r.id, r.schedule_id, s.binder_id FROM audit_coverage_requests r JOIN audit_schedules s ON s.id = r.schedule_id
-        WHERE r.id = $1 AND r.requested_to = $2 AND r.status = 'pending' FOR UPDATE`, [request.params.requestId, auditor.id]
+        WHERE r.id = $1 AND r.requested_to = $2 AND r.status = 'pending'
+          AND s.status IN ('scheduled', 'covered') AND s.assigned_auditor_id = r.requested_by
+          AND s.audit_date >= current_date FOR UPDATE`, [request.params.requestId, auditor.id]
     );
     if (!pending.rows[0]) return null;
     if (accepted) {
-      const eligible = await client.query("SELECT 1 FROM binders b JOIN locations l ON l.id = b.location_id WHERE b.id = $1 AND (l.owner_auditor_id IS NULL OR l.owner_auditor_id <> $2)", [pending.rows[0].binder_id, auditor.id]);
-      if (!eligible.rows[0]) throw new Error("owner cannot cover");
       await client.query("UPDATE audit_schedules SET assigned_auditor_id = $1, status = 'covered' WHERE id = $2", [auditor.id, pending.rows[0].schedule_id]);
     }
     await client.query("UPDATE audit_coverage_requests SET status = $1, responded_at = now() WHERE id = $2", [accepted ? "accepted" : "rejected", pending.rows[0].id]);
@@ -308,7 +321,7 @@ app.post("/audit-coverage-requests/:requestId/decision", requireAuth, async (req
 app.get("/dashboard", requireAuth, async (request, response) => {
   const auditor = authed(request).auditor;
   const ownedLocations = await pool.query("SELECT id, area_name, location_name FROM locations WHERE owner_auditor_id = $1 AND active = true ORDER BY area_name, location_name", [auditor.id]);
-  const scope = auditor.isGodAdmin ? { where: "a.status = 'submitted'", values: [] as string[] } : { where: "l.owner_auditor_id = $1 AND a.status = 'submitted' AND a.auditor_id <> $1", values: [auditor.id] };
+  const scope = auditor.isGodAdmin ? { where: "a.status = 'submitted'", values: [] as string[] } : { where: "a.auditor_id = $1 AND a.status = 'submitted'", values: [auditor.id] };
   const receivedAudits = await pool.query(
     `SELECT a.id, a.audit_date, l.area_name, l.location_name, b.binder_name, performed.display_name AS auditor_name,
              count(r.section_id) FILTER (WHERE 'missing' = ANY(coalesce(r.selected_results, ARRAY[r.result]))) AS exception_count
@@ -366,7 +379,7 @@ app.get("/audits/:auditId", requireAuth, async (request, response) => {
   const audit = rows[0];
   if (!audit) return response.status(404).json({ error: "Audit not found." });
   const viewer = authed(request).auditor;
-  if (!viewer.isGodAdmin && audit.owner_auditor_id !== viewer.id && audit.performed_by_id !== viewer.id) return response.status(403).json({ error: "You are not allowed to review this audit." });
+  if (!viewer.isGodAdmin && audit.performed_by_id !== viewer.id) return response.status(403).json({ error: "You are not allowed to review this audit." });
   const responses = await pool.query("SELECT section_id, result, selected_results, comment FROM audit_responses WHERE audit_id = $1 ORDER BY CASE section_id WHEN 'safety' THEN 1 WHEN 'opening' THEN 2 WHEN 'mid' THEN 3 WHEN 'closing' THEN 4 WHEN 'cooler' THEN 5 WHEN 'two-hour' THEN 6 WHEN 'protein' THEN 7 WHEN 'test' THEN 8 END", [audit.id]);
   response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, overallComment: audit.overall_comment, responses: responses.rows.map((row) => ({ sectionId: row.section_id, results: row.selected_results ?? [row.result], comment: row.comment })) });
 });
@@ -382,6 +395,13 @@ app.post("/audits", requireAuth, async (request, response) => {
     || item.results.some((result) => !allowedResults.includes(result))
     || new Set(item.results).size !== item.results.length
   )) return response.status(400).json({ error: "Audit statuses must be valid and cannot be selected more than once per section." });
+  const assignment = await pool.query(
+    `SELECT b.id FROM binders b JOIN locations l ON l.id = b.location_id
+      WHERE b.id = $1 AND l.active = true AND (l.owner_auditor_id = $2 OR EXISTS (
+        SELECT 1 FROM audit_schedules s WHERE s.binder_id = b.id
+          AND s.assigned_auditor_id = $2 AND s.audit_date = current_date AND s.status = 'covered'
+      ))`, [binderId, authed(request).auditor.id]);
+  if (!assignment.rows[0]) return response.status(403).json({ error: "You can only audit locations assigned to you, including accepted coverage for today." });
   const scheduled = await pool.query("SELECT assigned_auditor_id FROM audit_schedules WHERE binder_id = $1 AND audit_date = current_date AND status IN ('scheduled', 'covered')", [binderId]);
   if (scheduled.rows[0] && scheduled.rows[0].assigned_auditor_id !== authed(request).auditor.id) return response.status(403).json({ error: "This audit is scheduled for another auditor today." });
   try {
@@ -396,7 +416,7 @@ app.post("/audits", requireAuth, async (request, response) => {
     response.status(201).json({ id: audit.id, auditDate: audit.audit_date });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "";
-    response.status(409).json({ error: message.includes("owner cannot audit") ? "You cannot audit a location you own." : message.includes("audits_binder_id_audit_date_key") ? "An audit for this binder was already submitted today." : "Unable to submit this audit." });
+    response.status(409).json({ error: message.includes("not assigned") ? "This location is no longer assigned to you." : message.includes("audits_binder_id_audit_date_key") ? "An audit for this binder was already submitted today." : "Unable to submit this audit." });
   }
 });
 
