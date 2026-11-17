@@ -68,7 +68,8 @@ nav button:hover { background: #e5ede1; }
 .overall-comment textarea { min-height: 110px; }
 .password-reset fieldset { display: grid; gap: 14px; max-width: 620px; }
 .password-reset label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
-.password-reset input, .password-reset select { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: white; }
+.password-reset input, .password-reset select { display: block; width: 100%; min-height: 44px; padding: 11px 12px; border: 1px solid #8b9e87; border-radius: 8px; font: inherit; color: #203027; background: #fafcf8; }
+.password-reset input:focus-visible, .password-reset select:focus-visible { outline: 2px solid #386033; outline-offset: 2px; }
 .password-reset small { color: #637168; }
 .password-reset button { justify-self: start; }
 footer { padding: 24px 0 4px; }
