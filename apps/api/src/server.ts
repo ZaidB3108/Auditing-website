@@ -84,13 +84,13 @@ async function requireAuth(request: Request, response: Response, next: NextFunct
 }
 
 function requireGodAdmin(request: Request, response: Response, next: NextFunction) {
-  if (!authed(request).auditor.isGodAdmin) return response.status(403).json({ error: "Only God Admins can manage auditors and locations." });
+  if (!authed(request).auditor.isGodAdmin) return response.status(403).json({ error: "Only Admins can manage auditors and locations." });
   next();
 }
 
 function requireLocationManager(request: Request, response: Response, next: NextFunction) {
   const auditor = authed(request).auditor;
-  if (!auditor.isGodAdmin && !auditor.isLocationManager) return response.status(403).json({ error: "Only God Admins, Chuck, and Ken can assign locations." });
+  if (!auditor.isGodAdmin && !auditor.isLocationManager) return response.status(403).json({ error: "Only Admins, Chuck, and Ken can assign locations." });
   next();
 }
 
@@ -170,12 +170,12 @@ app.get("/auditors", requireAuth, async (_request, response) => {
 
 app.patch("/auditors/:auditorId/god-admin", requireAuth, requireGodAdmin, async (request, response) => {
   const { isGodAdmin } = request.body as { isGodAdmin?: boolean };
-  if (typeof isGodAdmin !== "boolean") return response.status(400).json({ error: "Choose whether this auditor should be a God Admin." });
+  if (typeof isGodAdmin !== "boolean") return response.status(400).json({ error: "Choose whether this auditor should be a Admin." });
   const target = await pool.query("SELECT id, is_god_admin FROM auditors WHERE id = $1 AND active = true", [request.params.auditorId]);
   if (!target.rows[0]) return response.status(404).json({ error: "Active auditor not found." });
   if (!isGodAdmin && target.rows[0].is_god_admin) {
     const count = await pool.query("SELECT count(*) FROM auditors WHERE active = true AND is_god_admin = true");
-    if (Number(count.rows[0].count) <= 1) return response.status(400).json({ error: "Keep at least one active God Admin." });
+    if (Number(count.rows[0].count) <= 1) return response.status(400).json({ error: "Keep at least one active Admin." });
   }
   const { rows } = await pool.query(
     `UPDATE auditors SET is_god_admin = $1, can_audit = true WHERE id = $2
@@ -202,7 +202,7 @@ app.post("/auditors", requireAuth, requireGodAdmin, async (request, response) =>
 
 app.delete("/auditors/:auditorId", requireAuth, requireGodAdmin, async (request, response) => {
   const { rows } = await pool.query("UPDATE auditors SET active = false WHERE id = $1 AND is_god_admin = false AND active = true RETURNING id", [request.params.auditorId]);
-  if (!rows[0]) return response.status(404).json({ error: "Active auditors can be removed, but God Admin accounts cannot be removed here." });
+  if (!rows[0]) return response.status(404).json({ error: "Active auditors can be removed, but Admin accounts cannot be removed here." });
   response.status(204).end();
 });
 
