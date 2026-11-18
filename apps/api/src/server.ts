@@ -380,11 +380,22 @@ app.get("/dashboard", requireAuth, async (request, response) => {
     ),
     pool.query(
       `SELECT a.display_name, x.start_date, x.end_date, x.note FROM auditor_absences x JOIN auditors a ON a.id = x.auditor_id
-        WHERE x.auditor_id <> $1 AND x.end_date >= current_date ORDER BY x.start_date, a.display_name`, [auditor.id]
+        WHERE (x.auditor_id <> $1 OR $2) AND a.active = true AND x.end_date >= current_date ORDER BY x.start_date, a.display_name`, [auditor.id, canAssignLocations(auditor)]
     )
   ]);
+  const transferRequests = canAssignLocations(auditor) ? await pool.query(
+    `SELECT t.id, t.note, t.status, t.created_at, t.requested_to,
+            l.location_name, l.area_name, sender.display_name AS sender_name,
+            recipient.display_name AS recipient_name
+       FROM audit_responsibility_transfers t
+       JOIN locations l ON l.id = t.location_id
+       JOIN auditors sender ON sender.id = t.requested_by
+       JOIN auditors recipient ON recipient.id = t.requested_to
+      ORDER BY t.created_at DESC`
+  ) : { rows: [] };
   response.json({
     isGodAdmin: auditor.isGodAdmin,
+    transferRequests: transferRequests.rows.map((row) => ({ id: row.id, note: row.note, status: row.status, createdAt: row.created_at, recipientId: row.requested_to, areaName: row.area_name, locationName: row.location_name, senderName: row.sender_name, recipientName: row.recipient_name })),
     ownedLocations: ownedLocations.rows.map((row) => ({ id: row.id, areaName: row.area_name, locationName: row.location_name })),
     receivedAudits: receivedAudits.rows.map((row) => ({ id: row.id, auditDate: row.audit_date, areaName: row.area_name, locationName: row.location_name, binderName: row.binder_name, auditorName: row.auditor_name, exceptionCount: Number(row.exception_count) })),
     incomingTransfers: incomingTransfers.rows.map((row) => ({ id: row.id, note: row.note, createdAt: row.created_at, areaName: row.area_name, locationName: row.location_name, senderName: row.sender_name })),
