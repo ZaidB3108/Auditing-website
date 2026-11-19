@@ -73,7 +73,17 @@ nav button:hover { background: #e5ede1; }
 .password-reset small { color: #637168; }
 .password-reset button { justify-self: start; }
 footer { padding: 24px 0 4px; }
-.archive-navigation { margin: 18px 0; }
+.audit-heading { align-items: center; gap: 24px; }
+.audit-heading > div:first-child { flex: 1; min-width: 0; }
+.archive-navigation { display: flex; justify-content: flex-end; flex-shrink: 0; margin: 0; }
+.archive-navigation .back { min-height: 44px; padding: 11px 18px; border: 1px solid #173d2d; border-radius: 8px; background: #173d2d; color: #fff; font: inherit; font-weight: 700; text-decoration: none; }
+.archive-navigation .back { white-space: nowrap; }
+.audit-results { margin-top: 24px; }
+.audit-results .audit-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 24px; row-gap: 8px; align-items: center; padding: 20px 0; }
+.audit-results .audit-list > div > strong, .audit-results .audit-list > div > span { grid-column: 1; }
+.audit-results .audit-list > div > button { grid-column: 2; grid-row: 1 / 3; margin: 0; justify-self: end; }
+.archive-navigation .back:hover { background: #24533e; }
+.archive-navigation .back:focus-visible { outline: 2px solid #386033; outline-offset: 3px; }
 .archive-action { margin: 14px 0 24px; }
 .archive-action button { background: #173d2d; color: white; border: 0; border-radius: 8px; padding: 12px 18px; font: inherit; font-weight: 700; cursor: pointer; }
 .archive-action button:disabled, .archive-pagination button:disabled { opacity: .5; cursor: not-allowed; }
@@ -81,6 +91,11 @@ footer { padding: 24px 0 4px; }
 .audit-review { margin: 20px 0; }
 
 @media (max-width: 620px) {
+  .audit-heading { flex-direction: column; align-items: stretch; gap: 16px; }
+  .archive-navigation { width: 100%; }
+  .archive-navigation .back { width: 100%; }
+  .audit-results .audit-list > div { grid-template-columns: minmax(0, 1fr); }
+  .audit-results .audit-list > div > button { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 4px; }
   nav { overflow-x: auto; }
   nav button { flex: 0 0 auto; }
   .location-grid { grid-template-columns: 1fr; }
