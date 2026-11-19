@@ -73,6 +73,12 @@ nav button:hover { background: #e5ede1; }
 .password-reset small { color: #637168; }
 .password-reset button { justify-self: start; }
 footer { padding: 24px 0 4px; }
+.archive-navigation { margin: 18px 0; }
+.archive-action { margin: 14px 0 24px; }
+.archive-action button { background: #173d2d; color: white; border: 0; border-radius: 8px; padding: 12px 18px; font: inherit; font-weight: 700; cursor: pointer; }
+.archive-action button:disabled, .archive-pagination button:disabled { opacity: .5; cursor: not-allowed; }
+.archive-pagination { display: flex; gap: 20px; align-items: baseline; margin-top: 20px; }
+.audit-review { margin: 20px 0; }
 
 @media (max-width: 620px) {
   nav { overflow-x: auto; }

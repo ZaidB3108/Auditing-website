@@ -348,7 +348,7 @@ app.post("/audit-coverage-requests/:requestId/decision", requireAuth, async (req
 app.get("/dashboard", requireAuth, async (request, response) => {
   const auditor = authed(request).auditor;
   const ownedLocations = await pool.query("SELECT id, area_name, location_name FROM locations WHERE owner_auditor_id = $1 AND active = true ORDER BY area_name, location_name", [auditor.id]);
-  const scope = auditor.isGodAdmin ? { where: "a.status = 'submitted'", values: [] as string[] } : { where: "a.auditor_id = $1 AND a.status = 'submitted'", values: [auditor.id] };
+  const scope = auditor.isGodAdmin ? { where: "a.status = 'submitted' AND a.reviewed_at IS NULL", values: [] as string[] } : { where: "a.auditor_id = $1 AND a.status = 'submitted'", values: [auditor.id] };
   const receivedAudits = await pool.query(
     `SELECT a.id, a.audit_date, l.area_name, l.location_name, b.binder_name, performed.display_name AS auditor_name,
              count(r.section_id) FILTER (WHERE 'missing' = ANY(coalesce(r.selected_results, ARRAY[r.result]))) AS exception_count
@@ -406,9 +406,53 @@ app.get("/dashboard", requireAuth, async (request, response) => {
   });
 });
 
+function requireArchiveViewer(request: Request, response: Response, next: NextFunction) {
+  if (!canAssignLocations(authed(request).auditor)) return response.status(403).json({ error: "Only Chuck and Chartwells Admin can access the archive." });
+  next();
+}
+
+app.get("/audit-archive/auditors", requireAuth, requireArchiveViewer, async (_request, response) => {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.display_name, count(a.id)::int AS audit_count
+       FROM auditors u LEFT JOIN audits a ON a.auditor_id = u.id
+         AND a.status = 'submitted' AND a.reviewed_at IS NOT NULL
+      WHERE (u.active AND u.can_audit) OR a.id IS NOT NULL
+      GROUP BY u.id ORDER BY u.display_name`
+  );
+  response.json(rows.map((row) => ({ id: row.id, displayName: row.display_name, auditCount: row.audit_count })));
+});
+
+app.get("/audit-archive", requireAuth, requireArchiveViewer, async (request, response) => {
+  const auditorId = request.query.auditorId;
+  const page = request.query.page === undefined ? 1 : Number(request.query.page);
+  if (typeof auditorId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(auditorId)
+      || !Number.isSafeInteger(page) || page < 1 || page > 100000) return response.status(400).json({ error: "Choose an auditor and valid archive page." });
+  const { rows } = await pool.query(
+    `SELECT a.id, to_char(a.audit_date, 'YYYY-MM-DD') AS audit_date, a.reviewed_at,
+            l.location_name, b.binder_name, u.display_name AS auditor_name
+       FROM audits a JOIN auditors u ON u.id = a.auditor_id
+       JOIN binders b ON b.id = a.binder_id JOIN locations l ON l.id = b.location_id
+      WHERE a.auditor_id = $1 AND a.status = 'submitted' AND a.reviewed_at IS NOT NULL
+      ORDER BY a.audit_date DESC, a.created_at DESC, a.id LIMIT 26 OFFSET $2`, [auditorId, (page - 1) * 25]
+  );
+  response.json({ hasMore: rows.length > 25, audits: rows.slice(0, 25).map((row) => ({ id: row.id, auditDate: row.audit_date, reviewedAt: row.reviewed_at, locationName: row.location_name, binderName: row.binder_name, auditorName: row.auditor_name })) });
+});
+
+app.post("/audits/:auditId/review", requireAuth, async (request, response) => {
+  const viewer = authed(request).auditor;
+  if (viewer.email.toLowerCase() !== "charles.weaver@compass-usa.com") return response.status(403).json({ error: "Only Chuck can mark an audit as reviewed and archive it." });
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(request.params.auditId))) return response.status(400).json({ error: "Invalid audit ID." });
+  const { rows } = await pool.query(
+    `UPDATE audits SET reviewed_at = coalesce(reviewed_at, now()), reviewed_by = coalesce(reviewed_by, $2)
+      WHERE id = $1 AND status = 'submitted' RETURNING reviewed_at`, [request.params.auditId, viewer.id]
+  );
+  if (!rows[0]) return response.status(404).json({ error: "Submitted audit not found." });
+  response.json({ reviewedAt: rows[0].reviewed_at });
+});
+
 app.get("/audits/:auditId", requireAuth, async (request, response) => {
   const { rows } = await pool.query(
-    `SELECT a.id, a.audit_date, a.overall_comment, l.owner_auditor_id, l.area_name, l.location_name, b.binder_name,
+    `SELECT a.id, a.audit_date, a.overall_comment, a.reviewed_at, l.owner_auditor_id, l.area_name, l.location_name, b.binder_name,
             performed.id AS performed_by_id, performed.display_name AS auditor_name
        FROM audits a JOIN binders b ON b.id = a.binder_id JOIN locations l ON l.id = b.location_id
        JOIN auditors performed ON performed.id = a.auditor_id
@@ -419,7 +463,7 @@ app.get("/audits/:auditId", requireAuth, async (request, response) => {
   const viewer = authed(request).auditor;
   if (!viewer.isGodAdmin && audit.performed_by_id !== viewer.id) return response.status(403).json({ error: "You are not allowed to review this audit." });
   const responses = await pool.query("SELECT section_id, result, selected_results, comment FROM audit_responses WHERE audit_id = $1 ORDER BY CASE section_id WHEN 'safety' THEN 1 WHEN 'opening' THEN 2 WHEN 'mid' THEN 3 WHEN 'closing' THEN 4 WHEN 'cooler' THEN 5 WHEN 'two-hour' THEN 6 WHEN 'protein' THEN 7 WHEN 'test' THEN 8 END", [audit.id]);
-  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, overallComment: audit.overall_comment, responses: responses.rows.map((row) => ({ sectionId: row.section_id, results: row.selected_results ?? [row.result], comment: row.comment })) });
+  response.json({ id: audit.id, auditDate: audit.audit_date, areaName: audit.area_name, locationName: audit.location_name, binderName: audit.binder_name, auditorName: audit.auditor_name, overallComment: audit.overall_comment, reviewedAt: audit.reviewed_at, responses: responses.rows.map((row) => ({ sectionId: row.section_id, results: row.selected_results ?? [row.result], comment: row.comment })) });
 });
 
 app.post("/audits", requireAuth, async (request, response) => {

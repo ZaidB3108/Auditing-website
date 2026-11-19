@@ -13,7 +13,7 @@ type Location = { id: string; areaName: string; locationName: string; ownerAudit
 type Section = { id: string; title: string; detail?: string };
 type AuditResponse = { results: Result[]; comment: string };
 type AuditSummary = { id: string; auditDate: string; areaName: string; locationName: string; binderName: string; auditorName: string; exceptionCount: number };
-type AuditDetail = AuditSummary & { overallComment: string | null; responses: Array<{ sectionId: string; results: Result[]; comment: string }> };
+type AuditDetail = AuditSummary & { overallComment: string | null; reviewedAt: string | null; responses: Array<{ sectionId: string; results: Result[]; comment: string }> };
 type Transfer = { id: string; note?: string; status?: string; createdAt: string; areaName: string; locationName: string; senderName?: string; recipientName?: string };
 type TransferRequest = Transfer & { recipientId: string };
 type ScheduledAudit = { id: string; auditDate: string; status: string; areaName: string; locationName: string; binderName: string };
@@ -133,6 +133,7 @@ function ScheduledAuditsPanel({ token, auditor, auditors, scheduledAudits, onUpd
 function CoverageDashboardNotice({ dashboard }: { dashboard: Dashboard }) { if (!dashboard.absences.length && !(AUDIT_SCHEDULING_ENABLED && dashboard.incomingCoverage.length)) return null; return <div className="profile-grid">{AUDIT_SCHEDULING_ENABLED && <article className="panel"><h2>Coverage attention</h2>{dashboard.incomingCoverage.length ? <p>You have {dashboard.incomingCoverage.length} coverage request{dashboard.incomingCoverage.length === 1 ? "" : "s"} awaiting a response in <strong>Schedule a leave</strong>.</p> : <p className="empty">No coverage requests awaiting your response.</p>}</article>}<article className="panel"><h2>Team leave notices</h2>{dashboard.absences.length ? <div className="audit-list">{dashboard.absences.slice(0, 3).map((item, index) => <div key={`${item.displayName}-${item.startDate}-${index}`}><strong>{item.displayName}</strong><span>{item.startDate} to {item.endDate}</span></div>)}</div> : <p className="empty">No upcoming leave notices.</p>}</article></div>; }
 
 function ProfileView({ dashboard, token, auditor, auditors, onUpdate }: { dashboard: Dashboard | null; token: string; auditor: Auditor; auditors: Auditor[]; onUpdate: () => Promise<void> }) {
+  const [showArchive, setShowArchive] = useState(false);
   const [transfer, setTransfer] = useState({ locationId: "", requestedToId: "", note: "" });
   const [message, setMessage] = useState(""); const [review, setReview] = useState<AuditDetail | null>(null); const [reviewError, setReviewError] = useState("");
   if (!dashboard) return <p>Loading…</p>;
@@ -141,19 +142,75 @@ function ProfileView({ dashboard, token, auditor, auditors, onUpdate }: { dashbo
   const decide = async (requestId: string, accepted: boolean) => { try { await request(`/audit-transfer-requests/${requestId}/decision`, token, { method: "POST", body: JSON.stringify({ accepted }) }); setMessage(accepted ? "Transfer accepted. You are now assigned to audit this location." : "Transfer request rejected."); await onUpdate(); } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to respond to transfer."); } };
   const reviewAudit = async (auditId: string) => { setReviewError(""); try { setReview(await request<AuditDetail>(`/audits/${auditId}`, token)); } catch (reason) { setReviewError(reason instanceof Error ? reason.message : "Unable to load the audit."); } };
   return <section>
-    <div className="heading"><div><h1>{isGod ? "All submitted audits" : "My audits & transfers"}</h1><p>{isGod ? "Admin access includes every submitted audit." : "Review the audits you have submitted."}</p></div></div>
+    <div className="heading"><div><h1>{isGod ? "All submitted audits" : "My audits & transfers"}</h1><p>{isGod ? "Audits awaiting review by Chuck. Reviewed audits are in Archived audits." : "Review the audits you have submitted."}</p></div></div>
     {message && <p className="success-message">{message}</p>}{reviewError && <p className="error">{reviewError}</p>}
     {!isGod && <CoverageDashboardNotice dashboard={dashboard} />}
-    {review && <AuditReview audit={review} onClose={() => setReview(null)} />}
+    {canAssignLocations(auditor) && <div className="archive-navigation"><button className="back" onClick={() => { setShowArchive(!showArchive); setReview(null); }}>{showArchive ? "← Back to unreviewed audits" : "Archived audits"}</button></div>}{review && <AuditReview audit={review} token={token} auditor={auditor} onClose={() => setReview(null)} onArchived={async () => { setReview(null); setMessage("Audit marked as reviewed and moved to Archived audits."); await onUpdate(); }} />}{showArchive && canAssignLocations(auditor) && <AuditArchive token={token} onReview={reviewAudit} />}
     {!isGod && <div className="profile-grid">{/* Hidden: assigned locations are already available in the Locations tab.
 <article className="panel"><h2>My assigned locations</h2>{dashboard.ownedLocations.length ? <ul>{dashboard.ownedLocations.map((location) => <li key={location.id}>{location.locationName}</li>)}</ul> : <p className="empty">No locations are assigned to you yet.</p>}</article>
 */}{auditor.canAudit && <form className="panel" onSubmit={requestTransfer}><h2>Transfer a location</h2><p>Request another auditor to take over auditing this location.</p><label>My location<select value={transfer.locationId} onChange={(event) => setTransfer({ ...transfer, locationId: event.target.value })} required><option value="">Choose location</option>{dashboard.ownedLocations.map((location) => <option key={location.id} value={location.id}>{location.locationName}</option>)}</select></label><label>Transfer to<select value={transfer.requestedToId} onChange={(event) => setTransfer({ ...transfer, requestedToId: event.target.value })} required><option value="">Choose auditor</option>{auditors.filter((item) => item.id !== auditor.id).map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label><label>Note (optional)<textarea value={transfer.note} onChange={(event) => setTransfer({ ...transfer, note: event.target.value })} placeholder="Reason or handoff detail" /></label><button disabled={!dashboard.ownedLocations.length}>Send request</button></form>}</div>}
     {!isGod && <div className="profile-grid"><article className="panel"><h2>Incoming transfer requests</h2>{dashboard.incomingTransfers.length ? <div className="audit-list">{dashboard.incomingTransfers.map((item) => <div key={item.id}><strong>{item.locationName}</strong><span>Requested by {item.senderName}{item.note ? ` · ${item.note}` : ""}</span><div><button onClick={() => void decide(item.id, true)}>Accept</button><button className="secondary" onClick={() => void decide(item.id, false)}>Reject</button></div></div>)}</div> : <p className="empty">No incoming transfer requests.</p>}</article><article className="panel"><h2>Requests I sent</h2>{dashboard.sentTransfers.length ? <div className="audit-list">{dashboard.sentTransfers.map((item) => <div key={item.id}><strong>{item.locationName}</strong><span>To {item.recipientName} · {item.status}</span></div>)}</div> : <p className="empty">No transfer requests sent.</p>}</article></div>}
-    <div className="profile-grid"><article className="panel"><h2>{isGod ? "Audit history" : "My submitted audits"}</h2>{dashboard.receivedAudits.length ? <div className="audit-list">{dashboard.receivedAudits.map((audit) => <div key={audit.id}><strong>{audit.locationName} · {audit.binderName}</strong><span>{audit.auditDate} · audited by {audit.auditorName} · {audit.exceptionCount} exception{audit.exceptionCount === 1 ? "" : "s"}</span><button onClick={() => void reviewAudit(audit.id)}>Review audit</button></div>)}</div> : <p className="empty">No submitted audits yet.</p>}</article></div>
+    {!showArchive && <div className="profile-grid"><article className="panel"><h2>{isGod ? "Awaiting review" : "My submitted audits"}</h2>{dashboard.receivedAudits.length ? <div className="audit-list">{dashboard.receivedAudits.map((audit) => <div key={audit.id}><strong>{audit.locationName} · {audit.binderName}</strong><span>{audit.auditDate} · audited by {audit.auditorName} · {audit.exceptionCount} exception{audit.exceptionCount === 1 ? "" : "s"}</span><button onClick={() => void reviewAudit(audit.id)}>Review audit</button></div>)}</div> : <p className="empty">No submitted audits yet.</p>}</article></div>}
   </section>;
 }
 
-function AuditReview({ audit, onClose }: { audit: AuditDetail; onClose: () => void }) { const statusLabel = (result: Result) => result === "current" ? "Current" : result === "past" ? "Past only" : result === "missing" ? "Missing" : "Not applicable"; return <article className="panel"><button className="back" onClick={onClose}>← Close audit review</button><h2>{audit.locationName} · {audit.binderName}</h2><p>{audit.auditDate} · audited by {audit.auditorName}</p><div className="audit-list">{audit.responses.map((answer) => <div key={answer.sectionId}><strong>{sections.find((section) => section.id === answer.sectionId)?.title ?? answer.sectionId}</strong><span>{answer.results.map(statusLabel).join(" + ")}{answer.comment ? ` · ${answer.comment}` : ""}</span></div>)}</div>{audit.overallComment && <div className="overall-comment"><strong>Overall audit comments</strong><p>{audit.overallComment}</p></div>}</article>; }
+function AuditReviewContents({ audit, onClose }: { audit: AuditDetail; onClose: () => void }) { const statusLabel = (result: Result) => result === "current" ? "Current" : result === "past" ? "Past only" : result === "missing" ? "Missing" : "Not applicable"; return <article className="panel"><button className="back" onClick={onClose}>← Close audit review</button><h2>{audit.locationName} · {audit.binderName}</h2><p>{audit.auditDate} · audited by {audit.auditorName}</p><div className="audit-list">{audit.responses.map((answer) => <div key={answer.sectionId}><strong>{sections.find((section) => section.id === answer.sectionId)?.title ?? answer.sectionId}</strong><span>{answer.results.map(statusLabel).join(" + ")}{answer.comment ? ` · ${answer.comment}` : ""}</span></div>)}</div>{audit.overallComment && <div className="overall-comment"><strong>Overall audit comments</strong><p>{audit.overallComment}</p></div>}</article>; }
+
+type ArchivedAudit = { id: string; auditDate: string; reviewedAt: string; locationName: string; binderName: string; auditorName: string };
+function AuditArchive({ token, onReview }: { token: string; onReview: (id: string) => Promise<void> }) {
+  const [people, setPeople] = useState<Array<{ id: string; displayName: string; auditCount: number }>>([]);
+  const [selected, setSelected] = useState("");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<{ audits: ArchivedAudit[]; hasMore: boolean }>({ audits: [], hasMore: false });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError("");
+    const load = async () => {
+      try {
+        if (!selected) {
+          const result = await request<typeof people>("/audit-archive/auditors", token);
+          if (!cancelled) setPeople(result);
+        } else {
+          const result = await request<typeof data>(`/audit-archive?auditorId=${encodeURIComponent(selected)}&page=${page}`, token);
+          if (!cancelled) setData(result);
+        }
+      } catch (reason) { if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load archive."); }
+      finally { if (!cancelled) setLoading(false); }
+    };
+    void load(); return () => { cancelled = true; };
+  }, [token, selected, page]);
+  const grouped = new Map<string, ArchivedAudit[]>();
+  for (const audit of data.audits) grouped.set(audit.auditDate, [...(grouped.get(audit.auditDate) ?? []), audit]);
+  return <section className="audit-archive"><h2>Archived audits</h2>
+    {selected && <button className="back" onClick={() => { setSelected(""); setPage(1); }}>← All auditors</button>}
+    {error && <p className="error" role="alert">{error}</p>}
+    {loading ? <p>Loading archived audits…</p> : !error && (!selected ? <div className="location-grid">
+      {people.map((person) => <article className="location-card" key={person.id}><h2>{person.displayName}</h2><p>{person.auditCount} archived audit{person.auditCount === 1 ? "" : "s"}</p><button onClick={() => { setSelected(person.id); setPage(1); }}>View archived audits</button></article>)}
+      {!people.length && <p>No auditors to display.</p>}
+    </div> : <div><h3>{people.find((person) => person.id === selected)?.displayName}</h3>
+      {Array.from(grouped, ([date, audits]) => <article className="panel proposals" key={date}><h3>{new Date(`${date}T12:00:00`).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</h3><div className="audit-list">{audits.map((audit) => <div key={audit.id}><strong>{audit.locationName} · {audit.binderName}</strong><span>Reviewed by Chuck · {new Date(audit.reviewedAt).toLocaleString()}</span><button onClick={() => void onReview(audit.id)}>View audit</button></div>)}</div></article>)}
+      {!data.audits.length && <p>No archived audits for this auditor.</p>}
+      <div className="archive-pagination"><button className="back" disabled={page === 1} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page}</span><button className="back" disabled={!data.hasMore} onClick={() => setPage(page + 1)}>Next</button></div>
+    </div>)}
+  </section>;
+}
+
+function AuditReview({ audit, token, auditor, onClose, onArchived }: { audit: AuditDetail; token: string; auditor: Auditor; onClose: () => void; onArchived: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const archive = async () => {
+    setBusy(true); setError("");
+    try { await request(`/audits/${audit.id}/review`, token, { method: "POST" }); await onArchived(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to archive audit."); }
+    finally { setBusy(false); }
+  };
+  return <div className="audit-review"><AuditReviewContents audit={audit} onClose={onClose} />
+    {audit.reviewedAt ? <p className="success-message">Reviewed by Chuck · {new Date(audit.reviewedAt).toLocaleString()}</p> : auditor.email.toLowerCase() === "charles.weaver@compass-usa.com" && <div className="archive-action"><button disabled={busy} onClick={() => void archive()}>{busy ? "Archiving…" : "Mark as reviewed & archive"}</button></div>}
+    {error && <p className="error" role="alert">{error}</p>}
+  </div>;
+}
 
 function PasswordResetForm({ token, auditors }: { token: string; auditors: Auditor[] }) {
   const [auditorId, setAuditorId] = useState("");
